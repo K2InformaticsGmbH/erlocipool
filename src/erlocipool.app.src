@@ -1,0 +1,12 @@
+{application, erlocipool,
+ [
+  {description, "Erloci connections pooling"},
+  {vsn, "0.0.1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { erlocipool, []}},
+  {env, []}
+ ]}.
