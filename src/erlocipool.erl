@@ -12,8 +12,14 @@
 %% Application callbacks
 %% ===================================================================
 
-start() -> application:start(?MODULE).
-stop() -> application:stop(?MODULE).
+start() ->
+    application:start(erloci),
+    application:start(?MODULE).
+
+stop() ->
+    application:stop(?MODULE),
+    application:stop(erloci).
+
 start(_StartType, _StartArgs) ->
     erlocipool_sup:start_link().
 
