@@ -1,3 +1,5 @@
+%%-*- erlang -*-
+%% ex: ft=erlang
 {application, erlocipool,
  [
   {description, "Erloci connections pooling"},
