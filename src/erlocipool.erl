@@ -8,7 +8,8 @@
 
 %% Using Pool APIs
 -export([share/2, has_access/1, prep_sql/2, commit/1, rollback/1, bind_vars/2,
-         lob/4, exec_stmt/1, exec_stmt/2, exec_stmt/3, fetch_rows/2, close/1]).
+         lob/4, exec_stmt/1, exec_stmt/2, exec_stmt/3, fetch_rows/2, close/1,
+         get_stats/1]).
 
 %% Application callbacks
 -export([start/0, stop/0, start/2, stop/1]).
@@ -62,7 +63,13 @@ new(Name, Tns, User, Password, Opts) ->
     end.
 
 del({?MODULE, Child}) ->
-    supervisor:terminate_child(?SUPNAME, Child).
+    supervisor:terminate_child(?SUPNAME, Child);
+del(PidOrName) ->
+    del({?MODULE, whereis(PidOrName)}).
+
+get_stats({?MODULE, PidOrName}) ->
+    gen_server:call(PidOrName, {sessions, self()});
+get_stats(PidOrName) -> get_stats({?MODULE, PidOrName}).
 
 %% ===================================================================
 %% Pool Access/Services APIs
@@ -79,11 +86,12 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 %
 % Statement management APIs
 %
-prep_sql(PidOrName, Sql) ->
+prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}) of
         {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
         Other -> Other
-    end.
+    end;
+prep_sql(PidOrName, Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
 
 close({?MODULE, PidOrName, Stmt}) ->
     gen_server:call(PidOrName, {close, self(), Stmt}).

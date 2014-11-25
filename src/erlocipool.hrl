@@ -11,4 +11,10 @@
 -define(POOL_GROWTH_DELAY, 1000).
 -define(DELAY_RETRY_AFTER_ERROR, 10000).
 
+-define(DBG(__Fun,__F,__A),
+        io:format(user, "{~p,~p,"__Fun",~p} "__F"~n",
+                  [?MODULE, ?LINE, self()|__A])
+       ).
+-define(DBG(__Fun,__F), ?DBG(__Fun,__F,[])).
+
 -endif. % ERLOCIPOOL_HRL
