@@ -17,7 +17,7 @@ logfun(_Log) -> ok.
             {ok, Pool} = erlocipool:new(__Name, ?TNS, ?USER, ?PASSWORD,
                                         [{logfun, fun logfun/1}|__Opts]),
             case Pool:prep_sql(<<"select * from dual">>) of
-                {error, no_sessions} -> timer:sleep(500);
+                {error, no_session} -> timer:sleep(500);
                 _ -> ok
             end,
             __Body,
@@ -28,7 +28,8 @@ basic_test_() ->
     {timeout, 60, {
         setup, fun() -> erlocipool:start() end, fun(_) -> erlocipool:stop() end,
         {with, [fun obj_private_public/1,
-                fun name_private_public/1
+                fun name_private_public/1,
+                fun fetch_data/1
                ]}
     }}.
 
@@ -84,3 +85,33 @@ name_private_public(_) ->
            ?assertMatch({error, private}, Result)
        end).
 
+fetch_data(_) ->
+    ?USINGPOOL(
+       k2wks015_pub, [{type, public}],
+       begin
+           {ok, Stmt} = Pool:prep_sql(<<"select * from dual">>),
+           ?assertMatch({cols, _}, Stmt:exec_stmt()),
+           ?assertMatch({{rows, _}, true}, Stmt:fetch_rows(2)),
+           Self = self(),
+           spawn(fun() ->
+                         Self ! Stmt:exec_stmt(),
+                         Self ! Stmt:fetch_rows(2)
+                 end),
+           Cols = receive R -> R end,
+           ?assertMatch({cols, _}, Cols),
+           Rows = receive R1 -> R1 end,
+           ?assertMatch({{rows, _}, true}, Rows)
+       end),
+    ?USINGPOOL(
+       k2wks015_priv, [{type, private}],
+       begin
+           {ok, Stmt} = Pool:prep_sql(<<"select * from dual">>),
+           ?assertMatch({cols, _}, Stmt:exec_stmt()),
+           ?assertMatch({{rows, _}, true}, Stmt:fetch_rows(2)),
+           Self = self(),
+           spawn(fun() ->
+                         Self ! Stmt:exec_stmt()
+                 end),
+           Cols = receive R -> R end,
+           ?assertMatch({error, private}, Cols)
+       end).

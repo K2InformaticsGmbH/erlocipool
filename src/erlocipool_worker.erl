@@ -50,6 +50,26 @@ handle_call({sessions, Pid}, From, State) ->
                                  closed_stmts = C} <- NewState#state.sessions],
              NewState}
     end;
+handle_call({stmt, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
+    case handle_call({has_access, Pid}, From, State) of
+        {reply, false, NewState} ->
+            {reply, {error, private}, NewState};
+        {reply, true, NewState} ->
+            case NewState#state.sessions of
+                [] ->
+                    {reply, {error, no_session}, NewState};
+                Sessions ->
+                    case [{oci_port, statement, PortPid, OciSessnHandle,
+                           OciStmtHandle}
+                          || #session{ssn = {oci_port, PortPid, OSessnH}}
+                             <- Sessions, OSessnH == OciSessnHandle] of
+                        [Statement] ->
+                            {reply, {ok, Statement}, NewState};
+                        [] ->
+                            {reply, {error, not_found}, NewState}
+                    end
+            end
+    end;
 handle_call({prep_sql, Pid, Sql}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
@@ -57,11 +77,31 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
         {reply, true, NewState} ->
             case NewState#state.sessions of
                 [] ->
-                    {reply, {error, no_sessions}, NewState};
+                    {reply, {error, no_session}, NewState};
                 Sessions ->
                     {Statement, NewSessions} = prep_sql(Sql, Sessions),
                     {reply, Statement,
                      NewState#state{sessions = NewSessions}}
+            end
+    end;
+handle_call({close, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
+    case handle_call({has_access, Pid}, From, State) of
+        {reply, false, NewState} ->
+            {reply, {error, private}, NewState};
+        {reply, true, NewState} ->
+            case NewState#state.sessions of
+                [] ->
+                    {reply, {error, no_session}, NewState};
+                Sessions ->
+                    case [{oci_port, statement, PortPid, OciSessnHandle,
+                           OciStmtHandle}
+                          || #session{ssn = {oci_port, PortPid, OSessnH}}
+                             <- Sessions, OSessnH == OciSessnHandle] of
+                        [Statement] ->
+                            {reply, Statement:close(), NewState};
+                        [] ->
+                            {reply, {error, not_found}, NewState}
+                    end
             end
     end;
 handle_call({share, Owner, SharePid}, _From, State) ->
@@ -97,7 +137,7 @@ prep_sql(Sql, [#session{
          {Statement, NewSessions}) ->
     case OciSession:prep_sql(Sql) of
         {oci_port, statement, _PortPid, OciSessionHandle, OciStatementHandle} ->
-            ?DBG("prep_sql", "sql ~p, statement ~p", [Sql, OciStatementHandle]),
+            %?DBG("prep_sql", "sql ~p, statement ~p", [Sql, OciStatementHandle]),
             prep_sql(Sql, [],
                      {{ok, {OciSessionHandle, OciStatementHandle}},
                       [Session#session{
