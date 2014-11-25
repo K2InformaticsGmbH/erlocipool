@@ -128,7 +128,8 @@ pool_test_() ->
                 OciPort = erloci:new(
                             [{logging, true},
                              {env, [{"NLS_LANG",
-                                     "GERMAN_SWITZERLAND.AL32UTF8"}]}]),
+                                     "GERMAN_SWITZERLAND.AL32UTF8"}]}],
+                            fun logfun/1),
                 OciSession = OciPort:get_session(?TNS, ?USER, ?PASSWORD),
                 Stmt = OciSession:prep_sql(?SESSSQL),
                 {cols, _} = Stmt:exec_stmt(),
@@ -148,10 +149,22 @@ pool_test_() ->
                 PoolSess = lists:flatten(SessAfterPool)
                 -- lists:flatten(SessBeforePool),                
                 io:format(user, "~p Pool session ~p~n", [Pool,
-                [list_to_binary(
-                   io_lib:format("alter system kill session '~s'", [Ps]))
-                 || Ps <- PoolSess]
+                [begin
+                     Stmt = OciSession:prep_sql(
+                              list_to_binary(
+                                io_lib:format("alter system kill session '~s'",
+                                              [Ps]))
+                             ),
+                     {executed, 0} = Stmt:exec_stmt(),
+                     ok = Stmt:close(),
+                     Ps
+                 end || Ps <- PoolSess]
                  ]),
+                Stmt = OciSession:prep_sql(?SESSSQL),
+                {cols, _} = Stmt:exec_stmt(),
+                {{rows, SessBeforePool1}, true} = Stmt:fetch_rows(10000),
+                ok = Stmt:close(),
+                io:format(user, "Pool session ~p~n", [SessBeforePool1]),
                 ok = OciSession:close(),
                 ok = OciPort:close(),
                 erlocipool:stop()

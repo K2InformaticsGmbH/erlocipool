@@ -31,14 +31,14 @@ $exename $start_opts -s erlocipool
 #  SET LINESIZE 100
 #  COLUMN spid FORMAT A10
 #  COLUMN username FORMAT A10
-#  COLUMN program FORMAT A45
+#  COLUMN machine FORMAT A20
 #
-#  SELECT s.inst_id,
-#         s.sid,
+#  SELECT s.sid,
 #         s.serial#,
 #         p.spid,
 #         s.username,
-#         s.program
+#         s.machine,
+#         s.port
 #  FROM   gv$session s
 #         JOIN gv$process p ON p.addr = s.paddr AND p.inst_id = s.inst_id
 #  WHERE  s.type != 'BACKGROUND' and s.program = 'ocierl.exe';
