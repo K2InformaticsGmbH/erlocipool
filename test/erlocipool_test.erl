@@ -115,3 +115,46 @@ fetch_data(_) ->
            Cols = receive R -> R end,
            ?assertMatch({error, private}, Cols)
        end).
+
+-define(SESSSQL,
+        <<"select '' || s.sid || ',' || s.serial# from gv$session s join "
+          "gv$process p on p.addr = s.paddr and p.inst_id = s.inst_id where "
+          "s.type != 'BACKGROUND' and s.program = 'ocierl.exe'">>).
+pool_test_() ->
+    {timeout, 60, {
+        setup,
+        fun() ->
+                erlocipool:start(),
+                OciPort = erloci:new(
+                            [{logging, true},
+                             {env, [{"NLS_LANG",
+                                     "GERMAN_SWITZERLAND.AL32UTF8"}]}]),
+                OciSession = OciPort:get_session(?TNS, ?USER, ?PASSWORD),
+                Stmt = OciSession:prep_sql(?SESSSQL),
+                {cols, _} = Stmt:exec_stmt(),
+                {{rows, SessBeforePool}, true} = Stmt:fetch_rows(10000),
+                ok = Stmt:close(),
+                {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
+                                        [{logfun, fun logfun/1},
+                                         {type, public}]),
+                timer:sleep(1000),
+                Stmt1 = OciSession:prep_sql(?SESSSQL),
+                {cols, _} = Stmt1:exec_stmt(),
+                {{rows, SessAfterPool}, true} = Stmt1:fetch_rows(10000),
+                ok = Stmt1:close(),
+                {Pool, OciPort, OciSession, SessBeforePool, SessAfterPool}
+        end,
+        fun({Pool, OciPort, OciSession, SessBeforePool, SessAfterPool}) ->
+                PoolSess = lists:flatten(SessAfterPool)
+                -- lists:flatten(SessBeforePool),                
+                io:format(user, "~p Pool session ~p~n", [Pool,
+                [list_to_binary(
+                   io_lib:format("alter system kill session '~s'", [Ps]))
+                 || Ps <- PoolSess]
+                 ]),
+                ok = OciSession:close(),
+                ok = OciPort:close(),
+                erlocipool:stop()
+        end,
+        {with, []}
+    }}.
