@@ -5,8 +5,8 @@
 
 -record(session, {ssn, monitor, open_stmts = 0, closed_stmts = 0}).
 -record(state, {name, type, owner, ociopts, logfun, tns, usr, passwd,
-                sess_min = 0, sess_max = 0, last_error, shares = [],
-                sessions = []}).
+                sess_min = 0, sess_max = 0, stmt_max = 0, last_error,
+                shares = [], sessions = [] :: #session{}}).
 
 % supervisor interface
 -export([start_link/6]).
@@ -34,10 +34,12 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
     Type = proplists:get_value(type, Opts, public),
     MinSession = proplists:get_value(sess_min, Opts, 10),
     MaxSession = proplists:get_value(sess_max, Opts, 20),
+    MaxStmtPerSession = proplists:get_value(stmt_max, Opts, 20),
     erlang:send_after(0, self(), build_pool),
     {ok, #state{name = Name, type = Type, owner = Owner, ociopts = OciOpts,
                 logfun = LogFun, tns = Tns, usr = User, passwd = Password,
-                sess_min = MinSession, sess_max = MaxSession}}.
+                sess_min = MinSession, sess_max = MaxSession,
+                stmt_max = MaxStmtPerSession}}.
 
 handle_call({sessions, Pid}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
@@ -50,7 +52,7 @@ handle_call({sessions, Pid}, From, State) ->
                                  closed_stmts = C} <- NewState#state.sessions],
              NewState}
     end;
-handle_call({stmt, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
+handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
@@ -61,8 +63,9 @@ handle_call({stmt, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
                 Sessions ->
                     case [{oci_port, statement, PortPid, OciSessnHandle,
                            OciStmtHandle}
-                          || #session{ssn = {oci_port, PortPid, OSessnH}}
-                             <- Sessions, OSessnH == OciSessnHandle] of
+                          || #session{ssn = {oci_port, PP, OSessnH}}
+                             <- Sessions, OSessnH == OciSessnHandle,
+                             PP == PortPid] of
                         [Statement] ->
                             {reply, {ok, Statement}, NewState};
                         [] ->
@@ -84,7 +87,7 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
                      NewState#state{sessions = NewSessions}}
             end
     end;
-handle_call({close, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
+handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
@@ -93,12 +96,19 @@ handle_call({close, Pid, {OciSessnHandle, OciStmtHandle}}, From, State) ->
                 [] ->
                     {reply, {error, no_session}, NewState};
                 Sessions ->
-                    case [{oci_port, statement, PortPid, OciSessnHandle,
-                           OciStmtHandle}
-                          || #session{ssn = {oci_port, PortPid, OSessnH}}
-                             <- Sessions, OSessnH == OciSessnHandle] of
-                        [Statement] ->
-                            {reply, Statement:close(), NewState};
+                    case [{{oci_port, statement, PortPid, OciSessnHandle,
+                           OciStmtHandle}, Session}
+                          || #session{ssn = {oci_port, PP, OSessnH}}
+                             = Session <- Sessions,
+                             OSessnH == OciSessnHandle, PP == PortPid] of
+                        [{Statement, Session}] ->
+                            NewSessions =
+                            [Session#session{
+                               open_stmts = Session#session.open_stmts - 1,
+                               closed_stmts = Session#session.closed_stmts + 1}
+                             | Sessions -- [Session]],
+                            {reply, Statement:close(),
+                             NewState#state{sessions = sort_sessions(NewSessions)}};
                         [] ->
                             {reply, {error, not_found}, NewState}
                     end
@@ -130,16 +140,16 @@ handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
 prep_sql(Sql, Sessions) -> prep_sql(Sql, Sessions, {undefined, []}).
-prep_sql(_Sql, [], {Statement, Sessions}) -> {Statement, Sessions};
+prep_sql(_Sql, [], {Statement, Sessions}) -> {Statement, sort_sessions(Sessions)};
 prep_sql(Sql, [#session{
                   ssn = {oci_port, _, OciSessionHandle} = OciSession
                  } = Session | Sessions],
          {Statement, NewSessions}) ->
     case OciSession:prep_sql(Sql) of
-        {oci_port, statement, _PortPid, OciSessionHandle, OciStatementHandle} ->
+        {oci_port, statement, PortPid, OciSessionHandle, OciStatementHandle} ->
             %?DBG("prep_sql", "sql ~p, statement ~p", [Sql, OciStatementHandle]),
             prep_sql(Sql, [],
-                     {{ok, {OciSessionHandle, OciStatementHandle}},
+                     {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
                       [Session#session{
                          open_stmts = Session#session.open_stmts + 1}
                        | Sessions] ++ NewSessions});
@@ -149,6 +159,12 @@ prep_sql(Sql, [#session{
                      {Statement,
                       [Session | Sessions] ++ NewSessions})
     end.
+
+sort_sessions(Sessions) ->
+    lists:sort(
+      fun(#session{open_stmts = OsA}, #session{open_stmts = OsB}) ->
+              if OsA =< OsB -> true; true -> false end
+      end, Sessions).
 
 handle_cast(_Request, State) ->
     {noreply, State}.
