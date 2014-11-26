@@ -3,10 +3,10 @@
 
 -include("erlocipool.hrl").
 
--record(session, {ssn, monitor, open_stmts = 0, closed_stmts = 0}).
--record(state, {name, type, owner, ociopts, logfun, tns, usr, passwd,
-                sess_min = 0, sess_max = 0, stmt_max = 0, last_error,
-                shares = [], sessions = [] :: #session{}}).
+-record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
+-record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
+                sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
+                shares = [], sessions = [] :: #session{}, downTh = 0}).
 
 % supervisor interface
 -export([start_link/6]).
@@ -29,17 +29,51 @@ start_link(Name, Owner, Tns, User, Password, Opts) ->
 %% ===================================================================
 
 init([Name, Owner, Tns, User, Password, Opts]) ->
-    OciOpts = proplists:get_value(ociopts, Opts),
-    LogFun = proplists:get_value(logfun, Opts),
-    Type = proplists:get_value(type, Opts, public),
-    MinSession = proplists:get_value(sess_min, Opts, 10),
-    MaxSession = proplists:get_value(sess_max, Opts, 20),
-    MaxStmtPerSession = proplists:get_value(stmt_max, Opts, 20),
-    erlang:send_after(0, self(), build_pool),
-    {ok, #state{name = Name, type = Type, owner = Owner, ociopts = OciOpts,
-                logfun = LogFun, tns = Tns, usr = User, passwd = Password,
-                sess_min = MinSession, sess_max = MaxSession,
-                stmt_max = MaxStmtPerSession}}.
+    try
+        OciOpts = proplists:get_value(ociOpts, Opts, []),
+        if is_list(OciOpts) -> ok;
+           true -> exit({invalid, ociOpts}) end,
+
+        LogFun = proplists:get_value(logfun, Opts),
+        if is_function(LogFun, 1) orelse LogFun == undefined  -> ok;
+           true -> exit({invalid, logfun}) end,
+
+        Type = proplists:get_value(type, Opts, public),
+        if Type == public orelse Type == private -> ok;
+           true -> exit({invalid, type}) end,
+
+        MinSessions = proplists:get_value(sess_min, Opts, 10),
+        if is_integer(MinSessions) andalso MinSessions > 0 -> ok;
+           true -> exit({invalid, sess_min}) end,
+
+        MaxSessions = proplists:get_value(sess_max, Opts, 20),
+        if is_integer(MaxSessions) andalso MaxSessions >= MinSessions -> ok;
+           true -> exit({invalid, sess_max}) end,
+
+        MaxStmtsPerSession = proplists:get_value(stmt_max, Opts, 20),
+        if is_integer(MaxStmtsPerSession) andalso MaxStmtsPerSession > 1 -> ok;
+           true -> exit({invalid, stmt_max}) end,
+        
+        UpThreshHold = proplists:get_value(up_th, Opts, 50),
+        if is_integer(UpThreshHold) andalso UpThreshHold > 1
+           andalso UpThreshHold < 100 -> ok;
+           true -> exit({invalid, up_th}) end,
+        
+        DownThreshHold = proplists:get_value(down_th, Opts, 40),
+        if is_integer(DownThreshHold) andalso DownThreshHold > 1 andalso
+           DownThreshHold < 100 andalso DownThreshHold < UpThreshHold -> ok;
+           true -> exit({invalid, down_th}) end,
+
+        erlang:send_after(0, self(), {build_pool, MinSessions}),
+        process_flag(trap_exit, true),
+        {ok, #state{name = Name, type = Type, owner = Owner, ociOpts = OciOpts,
+                    logFun = LogFun, tns = Tns, usr = User, passwd = Password,
+                    sessMin = MinSessions, sessMax = MaxSessions,
+                    stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
+                    downTh = DownThreshHold}}
+    catch
+        _:Reason -> {stop, Reason}
+    end.
 
 handle_call({sessions, Pid}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
@@ -48,8 +82,8 @@ handle_call({sessions, Pid}, From, State) ->
         {reply, true, NewState} ->
             {reply, [{OciSession, O, C}
                      || #session{ssn = OciSession,
-                                 open_stmts = O,
-                                 closed_stmts = C} <- NewState#state.sessions],
+                                 openStmts = O,
+                                 closedStmts = C} <- NewState#state.sessions],
              NewState}
     end;
 handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
@@ -75,16 +109,15 @@ handle_call({stmt, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) 
     end;
 handle_call({prep_sql, Pid, Sql}, From, State) ->
     case handle_call({has_access, Pid}, From, State) of
-        {reply, false, NewState} ->
-            {reply, {error, private}, NewState};
-        {reply, true, NewState} ->
-            case NewState#state.sessions of
-                [] ->
-                    {reply, {error, no_session}, NewState};
-                Sessions ->
-                    {Statement, NewSessions} = prep_sql(Sql, Sessions),
-                    {reply, Statement,
-                     NewState#state{sessions = NewSessions}}
+        {reply, false, State1} ->
+            {reply, {error, private}, State1};
+        {reply, true, State1} ->
+            if length(State1#state.sessions) == 0 ->
+                   {reply, {error, no_session}, State1};
+               true ->
+                   {Statement, State2}
+                   = prep_sql(Sql, State1),
+                   {reply, Statement, State2}
             end
     end;
 handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State) ->
@@ -104,8 +137,8 @@ handle_call({close, Pid, {PortPid, OciSessnHandle, OciStmtHandle}}, From, State)
                         [{Statement, Session}] ->
                             NewSessions =
                             [Session#session{
-                               open_stmts = Session#session.open_stmts - 1,
-                               closed_stmts = Session#session.closed_stmts + 1}
+                               openStmts = Session#session.openStmts - 1,
+                               closedStmts = Session#session.closedStmts + 1}
                              | Sessions -- [Session]],
                             {reply, Statement:close(),
                              NewState#state{sessions = sort_sessions(NewSessions)}};
@@ -139,74 +172,133 @@ handle_call({has_access, Pid}, _From, State) ->
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
-prep_sql(Sql, Sessions) -> prep_sql(Sql, Sessions, {undefined, []}).
-prep_sql(_Sql, [], {Statement, Sessions}) -> {Statement, sort_sessions(Sessions)};
-prep_sql(Sql, [#session{
-                  ssn = {oci_port, _, OciSessionHandle} = OciSession
-                 } = Session | Sessions],
-         {Statement, NewSessions}) ->
-    case OciSession:prep_sql(Sql) of
-        {oci_port, statement, PortPid, OciSessionHandle, OciStatementHandle} ->
-            %?DBG("prep_sql", "sql ~p, statement ~p", [Sql, OciStatementHandle]),
-            prep_sql(Sql, [],
-                     {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
-                      [Session#session{
-                         open_stmts = Session#session.open_stmts + 1}
-                       | Sessions] ++ NewSessions});
-        Other ->
-            ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
-            prep_sql(Sql, [],
-                     {Statement,
-                      [Session | Sessions] ++ NewSessions})
+-spec prep_sql(Sql :: binary(), State :: #state{}) ->
+    {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
+prep_sql(Sql, #state{} = State) ->
+    case pick_session(State) of
+        {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn} = Session,
+         NewState} ->
+            case OciSsn:prep_sql(Sql) of
+                {oci_port, statement, PortPid, OciSessionHandle,
+                 OciStatementHandle} ->
+                    %?DBG("prep_sql", "sql ~p, statement ~p",
+                    %[Sql, OciStatementHandle]),
+                    {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
+                     NewState#state{
+                       sessions = sort_sessions(
+                                    [Session#session{
+                                       openStmts = Session#session.openStmts + 1}
+                                     | NewState#state.sessions -- [Session]])
+                      }};
+                Other ->
+                    ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
+                    {{error, Other}, NewState}
+            end;
+        {error, Error} ->
+            {{error, Error}, State}
+    end.
+
+-spec pick_session(State :: #state{}) ->
+    {ok, Session :: #session{}, NewState :: #state{}}
+    | {error, elimit}.
+pick_session(#state{sessions = Sessions, sessMin = _MinSess, sessMax = MaxSess,
+                    stmtMax = MaxStmts, upTh = UpTh,
+                    downTh = DownTh} = State) ->
+    SessionCount = length(Sessions),
+    UpThCount = erlang:round(SessionCount * UpTh / 100),
+    DnThCount = erlang:round(SessionCount * DownTh / 100),
+    SaturatedSessions = length([1 || #session{openStmts = Os} <- Sessions,
+                                     Os >= MaxStmts - 1]),
+    if SaturatedSessions >= UpThCount ->
+           % UP state:
+           % Pool growth by 1 will be triggered if possible
+           if SaturatedSessions == MaxSess ->
+                  % Pool is staurated
+                  % (can't create any more connections or statements)
+                  {error, elimit};
+              SessionCount == MaxSess andalso SaturatedSessions =< MaxSess ->
+                  % Pool has reached growth limit. Reusing least used
+                  % connection (from the front of the list) to create new
+                  % statement
+                  [Session | _] = Sessions,
+                  {ok, Session, State};
+              true ->
+                  % Reuse the least used connection (from the front of the
+                  % list) and also trigger pool growth by 1
+                  erlang:send_after(0, self(), {build_pool, 1}),
+                  [Session | _] = Sessions,
+                  {ok, Session, State}
+           end;
+       SaturatedSessions =< DnThCount ->
+           % DOWN state
+           % TODO New statement is assigned to second least loaded session.
+           % TODO Pool is reduced by closing old connections if possible.
+           [Session | _] = Sessions,
+           {ok, Session, State};
+       true ->
+           % HOLD state
+           % Pool neither grow or reduce in this state. Reusing least used
+           % connection (from the front of the list) to create new statement
+           [Session | _] = Sessions,
+           {ok, Session, State}
     end.
 
 sort_sessions(Sessions) ->
     lists:sort(
-      fun(#session{open_stmts = OsA}, #session{open_stmts = OsB}) ->
+      fun(#session{openStmts = OsA}, #session{openStmts = OsB}) ->
               if OsA =< OsB -> true; true -> false end
       end, Sessions).
 
 handle_cast(_Request, State) ->
     {noreply, State}.
 
-handle_info(build_pool, State) ->
-    case State#state.last_error of
+handle_info({build_pool, N}, State) ->
+    case State#state.lastError of
         undefined ->
-            case catch erloci:new(State#state.ociopts, State#state.logfun) of
-                {'EXIT', {Error, _}} ->
-                    erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(), build_pool),
-                    {noreply, State#state{last_error = Error}};
-                {oci_port, PortPid} = OciPort ->
-                    case OciPort:get_session(State#state.tns, State#state.usr,
-                                             State#state.passwd) of
-                        {error, Error} ->
-                            erlang:send_after(?DELAY_RETRY_AFTER_ERROR,
-                                              self(), build_pool),
-                            {noreply, State#state{last_error = Error}};
-                        {oci_port, PortPid, _} = OciSession ->
-                            if length(State#state.sessions) + 1
-                               < State#state.sess_min ->
-                                   erlang:send_after(0, self(), build_pool);
-                                   true -> ok
-                            end,
-                            {noreply, State#state{
-                                        sessions
-                                        = [#session{
-                                              ssn = OciSession,
-                                              monitor = erlang:monitor(
-                                                          process, PortPid)}
-                                           | State#state.sessions]}}
-                    end
+            if length(State#state.sessions) < State#state.sessMax
+               andalso N > 0 ->
+                   case catch erloci:new(State#state.ociOpts,
+                                         State#state.logFun) of
+                       {'EXIT', {Error, _}} ->
+                           erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(),
+                                             {build_pool, N}),
+                           {noreply, State#state{lastError = Error}};
+                       {oci_port, PortPid} = OciPort ->
+                           case OciPort:get_session(State#state.tns,
+                                                    State#state.usr,
+                                                    State#state.passwd) of
+                               {error, Error} ->
+                                   erlang:send_after(?DELAY_RETRY_AFTER_ERROR,
+                                                     self(), {build_pool, N}),
+                                   {noreply, State#state{lastError = Error}};
+                               {oci_port, PortPid, _} = OciSession ->
+                                   erlang:send_after(0, self(),
+                                                     {build_pool, N - 1}),
+                                   {noreply,
+                                    State#state{sessions
+                                                = [#session{
+                                                      ssn = OciSession,
+                                                      monitor = erlang:monitor(
+                                                                  process,
+                                                                  PortPid)}
+                                                   | State#state.sessions]}}
+                           end
+                   end;
+               true ->
+                   {noreply, State}
             end;
-        _Error ->            
-            erlang:send_after(0, self(), build_pool),
-            {noreply, State#state{last_error = undefined}}
+        _Error ->
+            erlang:send_after(0, self(), {build_pool, N}),
+            {noreply, State#state{lastError = undefined}}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
-terminate(_Reason, _State) ->
-    ok.
+terminate(_Reason, #state{sessions = Sessions}) ->
+    [begin
+         OciPort = {oci_port, PortPid},
+         ok = OciPort:close()
+     end || #session{ssn = {_, PortPid, _}} <- Sessions].
 
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.

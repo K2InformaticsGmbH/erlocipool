@@ -132,7 +132,9 @@ pool_test_() ->
                 ok = Stmt:close(),
                 {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
                                         [{logfun, fun logfun/1},
-                                         {type, public}]),
+                                         {type, public}, {sess_min, 1},
+                                         {sess_max, 2}, {stmt_max, 2},
+                                         {up_th, 50}, {down_th, 40}]),
                 timer:sleep(1000),
                 Stmt1 = OciSession:prep_sql(?SESSSQL),
                 {cols, _} = Stmt1:exec_stmt(),
@@ -168,22 +170,16 @@ pool_test_() ->
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore, _SessAfter}) ->
     Stats = Pool:get_stats(),
-    ?assertEqual(10, length(Stats)),
-    ?assertMatch([{_,0,0}, {_,0,0}, {_,0,0}, {_,0,0}, {_,0,0},
-                  {_,0,0}, {_,0,0}, {_,0,0}, {_,0,0}, {_,0,0}], Stats),
+    ?assertEqual(1, length(Stats)),
+    ?assertMatch([{_,0,0}], Stats),
     Sql = <<"select * from dual">>,
-    Stmts = [begin
-                 {ok, Stmt} = Pool:prep_sql(Sql),
-                 ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',1,0,0}]}, Stmt:exec_stmt()),
-                 ?assertEqual({{rows, [[<<"X">>]]}, true}, Stmt:fetch_rows(2)),
-                 Stmt
-             end || _ <- lists:seq(1,10)],
+    {ok, Stmt} = Pool:prep_sql(Sql),
+    ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',1,0,0}]}, Stmt:exec_stmt()),
+    ?assertEqual({{rows, [[<<"X">>]]}, true}, Stmt:fetch_rows(2)),
     Stats1 = Pool:get_stats(),
-    ?assertEqual(10, length(Stats1)),
-    ?assertMatch([{_,1,0}, {_,1,0}, {_,1,0}, {_,1,0}, {_,1,0},
-                  {_,1,0}, {_,1,0}, {_,1,0}, {_,1,0}, {_,1,0}], Stats1),
-    [?assertEqual(ok, Stmt:close()) || Stmt <- Stmts],
+    ?assertEqual(2, length(Stats1)),
+    ?assertMatch([{_,0,0}, {_,1,0}], Stats1),
+    ?assertEqual(ok, Stmt:close()),
     Stats2 = Pool:get_stats(),
-    ?assertEqual(10, length(Stats2)),
-    ?assertMatch([{_,0,1}, {_,0,1}, {_,0,1}, {_,0,1}, {_,0,1},
-                  {_,0,1}, {_,0,1}, {_,0,1}, {_,0,1}, {_,0,1}], Stats2).
+    ?assertEqual(2, length(Stats2)),
+    ?assertMatch([{_,0,0}, {_,0,1}], Stats2).
