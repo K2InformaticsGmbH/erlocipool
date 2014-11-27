@@ -132,8 +132,8 @@ pool_test_() ->
                 ok = Stmt:close(),
                 {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
                                         [{logfun, fun logfun/1},
-                                         {type, public}, {sess_min, 1},
-                                         {sess_max, 2}, {stmt_max, 2},
+                                         {type, public}, {sess_min, 2},
+                                         {sess_max, 4}, {stmt_max, 1},
                                          {up_th, 50}, {down_th, 40}]),
                 timer:sleep(1000),
                 Stmt1 = OciSession:prep_sql(?SESSSQL),
@@ -143,43 +143,65 @@ pool_test_() ->
                 {Pool, OciPort, OciSession, SessBeforePool, SessAfterPool}
         end,
         fun({Pool, OciPort, OciSession, SessBeforePool, SessAfterPool}) ->
+                ?assertEqual(ok, application:stop(erlocipool)),
                 PoolSess = lists:flatten(SessAfterPool)
                 -- lists:flatten(SessBeforePool),
-                io:format(user, "~p Pool session ~p~n", [Pool,
+                ?debugFmt("Pool : ~p~nSessBeforePool : ~p~n"
+                          "SessAfterPool : ~p~nPoolSess : ~p~n",
+                          [Pool, lists:flatten(SessBeforePool),
+                           lists:flatten(SessAfterPool), PoolSess]),
                 [begin
                      Stmt = OciSession:prep_sql(
                               list_to_binary(
-                                io_lib:format("alter system kill session '~s'",
-                                              [Ps]))
+                                io_lib:format(
+                                  "alter system kill session '~s' immediate",
+                                  [Ps]))
                              ),
-                     {executed, 0} = Stmt:exec_stmt(),
-                     ok = Stmt:close(),
-                     Ps
-                 end || Ps <- PoolSess]
-                 ]),
+                     case Stmt:exec_stmt() of
+                         {error,{30,<<"ORA-00030: User session ID does not"
+                                      " exist.\n">>}} -> ok;
+                         {executed, 0} ->
+                             ?debugFmt("~p wasn't closed on pool stop", [Ps]),
+                             ?assertEqual(ok, Stmt:close())
+                     end
+                 end || Ps <- PoolSess],
                 Stmt = OciSession:prep_sql(?SESSSQL),
                 {cols, _} = Stmt:exec_stmt(),
                 ?assertEqual({{rows, SessBeforePool}, true}, Stmt:fetch_rows(10000)),
                 ok = Stmt:close(),
                 ok = OciSession:close(),
                 ok = OciPort:close(),
-                erlocipool:stop()
+                ?assertEqual(ok, application:stop(erloci))
         end,
         {with, [fun saturate_recover/1]}
     }}.
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore, _SessAfter}) ->
     Stats = Pool:get_stats(),
-    ?assertEqual(1, length(Stats)),
-    ?assertMatch([{_,0,0}], Stats),
-    Sql = <<"select * from dual">>,
-    {ok, Stmt} = Pool:prep_sql(Sql),
-    ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',1,0,0}]}, Stmt:exec_stmt()),
-    ?assertEqual({{rows, [[<<"X">>]]}, true}, Stmt:fetch_rows(2)),
+    ?assertEqual(2, length(Stats)),
+    ?assertMatch([{_,0,0},{_,0,0}], Stats),
+    [S1] = stmts(Pool, 1),
     Stats1 = Pool:get_stats(),
     ?assertEqual(2, length(Stats1)),
-    ?assertMatch([{_,0,0}, {_,1,0}], Stats1),
-    ?assertEqual(ok, Stmt:close()),
+    ?assertMatch([{_,0,0},{_,1,0}], Stats1),
+    [S2] = stmts(Pool, 1),
     Stats2 = Pool:get_stats(),
-    ?assertEqual(2, length(Stats2)),
-    ?assertMatch([{_,0,0}, {_,0,1}], Stats2).
+    ?assertEqual(3, length(Stats2)),
+    ?assertMatch([{_,0,0},{_,1,0},{_,1,0}], Stats2),
+    [S3, S4] = stmts(Pool, 2),
+    Stats3 = Pool:get_stats(),
+    ?assertEqual(4, length(Stats3)),
+    ?assertMatch([{_,1,0},{_,1,0},{_,1,0},{_,1,0}], Stats3),
+    ?assertEqual({error, elimit}, Pool:prep_sql(<<"select * from dual">>)),
+    ?assertEqual(ok, S1:close()),
+    ?assertEqual(ok, S2:close()),
+    ?assertEqual(ok, S3:close()),
+    ?assertEqual(ok, S4:close()).
+
+stmts(Pool, N) -> stmts(Pool, N, []).
+stmts(_Pool, 0, Acc) -> lists:reverse(Acc);
+stmts(Pool, N, Acc) when N > 0 ->
+    {ok, Stmt} = Pool:prep_sql(<<"select * from dual">>),
+    ?assertEqual({cols, [{<<"DUMMY">>,'SQLT_CHR',1,0,0}]}, Stmt:exec_stmt()),
+    ?assertEqual({{rows, [[<<"X">>]]}, true}, Stmt:fetch_rows(2)),
+    stmts(Pool, N-1, [Stmt | Acc]).

@@ -43,7 +43,7 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
            true -> exit({invalid, type}) end,
 
         MinSessions = proplists:get_value(sess_min, Opts, 10),
-        if is_integer(MinSessions) andalso MinSessions > 0 -> ok;
+        if is_integer(MinSessions) andalso MinSessions > 1 -> ok;
            true -> exit({invalid, sess_min}) end,
 
         MaxSessions = proplists:get_value(sess_max, Opts, 20),
@@ -51,17 +51,17 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
            true -> exit({invalid, sess_max}) end,
 
         MaxStmtsPerSession = proplists:get_value(stmt_max, Opts, 20),
-        if is_integer(MaxStmtsPerSession) andalso MaxStmtsPerSession > 1 -> ok;
+        if is_integer(MaxStmtsPerSession) andalso MaxStmtsPerSession > 0 -> ok;
            true -> exit({invalid, stmt_max}) end,
         
         UpThreshHold = proplists:get_value(up_th, Opts, 50),
-        if is_integer(UpThreshHold) andalso UpThreshHold > 1
-           andalso UpThreshHold < 100 -> ok;
+        if is_number(UpThreshHold) andalso UpThreshHold > 1.0
+           andalso UpThreshHold < 100.0 -> ok;
            true -> exit({invalid, up_th}) end,
         
         DownThreshHold = proplists:get_value(down_th, Opts, 40),
-        if is_integer(DownThreshHold) andalso DownThreshHold > 1 andalso
-           DownThreshHold < 100 andalso DownThreshHold < UpThreshHold -> ok;
+        if is_number(DownThreshHold) andalso DownThreshHold > 1.0 andalso
+           DownThreshHold < 100.0 andalso DownThreshHold < UpThreshHold -> ok;
            true -> exit({invalid, down_th}) end,
 
         erlang:send_after(0, self(), {build_pool, MinSessions}),
@@ -201,22 +201,23 @@ prep_sql(Sql, #state{} = State) ->
 -spec pick_session(State :: #state{}) ->
     {ok, Session :: #session{}, NewState :: #state{}}
     | {error, elimit}.
-pick_session(#state{sessions = Sessions, sessMin = _MinSess, sessMax = MaxSess,
+pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
                     stmtMax = MaxStmts, upTh = UpTh,
                     downTh = DownTh} = State) ->
     SessionCount = length(Sessions),
-    UpThCount = erlang:round(SessionCount * UpTh / 100),
-    DnThCount = erlang:round(SessionCount * DownTh / 100),
     SaturatedSessions = length([1 || #session{openStmts = Os} <- Sessions,
-                                     Os >= MaxStmts - 1]),
-    if SaturatedSessions >= UpThCount ->
-           % UP state:
+                                     Os >= MaxStmts]),
+    SaturatedSessCent = SaturatedSessions / SessionCount * 100,
+    
+    if
+        % UP
+        SaturatedSessCent >= UpTh ->
            % Pool growth by 1 will be triggered if possible
-           if SaturatedSessions == MaxSess ->
+           if SaturatedSessions >= MaxSess ->
                   % Pool is staurated
                   % (can't create any more connections or statements)
                   {error, elimit};
-              SessionCount == MaxSess andalso SaturatedSessions =< MaxSess ->
+              SaturatedSessions < MaxSess andalso SessionCount == MaxSess ->
                   % Pool has reached growth limit. Reusing least used
                   % connection (from the front of the list) to create new
                   % statement
@@ -229,14 +230,14 @@ pick_session(#state{sessions = Sessions, sessMin = _MinSess, sessMax = MaxSess,
                   [Session | _] = Sessions,
                   {ok, Session, State}
            end;
-       SaturatedSessions =< DnThCount ->
-           % DOWN state
+       % DOWN
+       SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
            % TODO New statement is assigned to second least loaded session.
            % TODO Pool is reduced by closing old connections if possible.
            [Session | _] = Sessions,
            {ok, Session, State};
+       % HOLD
        true ->
-           % HOLD state
            % Pool neither grow or reduce in this state. Reusing least used
            % connection (from the front of the list) to create new statement
            [Session | _] = Sessions,

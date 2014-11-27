@@ -87,7 +87,7 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 % Statement management APIs
 %
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
-    case gen_server:call(PidOrName, {prep_sql, self(), Sql}) of
+    case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
         {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
         Other -> Other
     end;
