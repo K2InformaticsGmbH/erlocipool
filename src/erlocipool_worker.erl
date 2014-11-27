@@ -64,7 +64,7 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
            DownThreshHold < 100.0 andalso DownThreshHold < UpThreshHold -> ok;
            true -> exit({invalid, down_th}) end,
 
-        erlang:send_after(0, self(), {build_pool, MinSessions}),
+        self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
         {ok, #state{name = Name, type = Type, owner = Owner, ociOpts = OciOpts,
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
@@ -226,7 +226,7 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
                true ->
                    % Reuse the least used connection (from the front of the
                    % list) and also trigger pool growth by 1
-                   erlang:send_after(0, self(), {build_pool, 1}),
+                   self() ! {build_pool, 1},
                    [Session | _] = Sessions,
                    {ok, Session, State}
             end;
@@ -234,8 +234,7 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
         SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
             % Pool reduction check triggered
             % (may close old empty connections if exists)
-            erlang:send_after(0, self(), {check_reduce,
-                                          SessionCount - MinSess}),
+            self() ! {check_reduce, SessionCount - MinSess},
             % New statement is assigned to second least loaded session.
             case Sessions of
                 [#session{openStmts = Os1}, #session{openStmts = Os2} = S
@@ -262,6 +261,38 @@ sort_sessions(Sessions) ->
               if OsA =< OsB -> true; true -> false end
       end, Sessions).
 
+handle_cast({kill, #session{
+                      ssn = {oci_port, PortPid, _},
+                      monitor = OciMon} = Session},
+            State) ->
+    try
+        true = demonitor(OciMon, flush),
+        OciPort = {oci_port, PortPid},
+        ok = OciPort:close()
+    catch
+        _:Reason ->
+            ?DBG("handle_cast(kill)", "error ~p~n~p",
+                 [Reason, erlang:get_stacktrace()])
+    end,
+    self() ! {build_pool, State#state.sessMin - length(State#state.sessions)},
+    {noreply, State#state{
+                sessions = sort_sessions(State#state.sessions -- [Session])}};
+handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
+    Self = self(),
+    spawn(fun() ->
+                  OciSession = {oci_port, PortPid, OciSessnHandle},
+                  case catch OciSession:ping() of
+                      ok -> ok;
+                      _Error ->
+                          case [S || #session{ssn={oci_port,PP,OSessnH}}=S
+                                     <- State#state.sessions,
+                                     OSessnH==OciSessnHandle, PP==PortPid] of
+                              [S] -> gen_server:cast(Self, {kill, S});
+                              _ -> ok
+                          end
+                  end
+          end),
+    {noreply, State};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -273,7 +304,7 @@ handle_info({check_reduce, ToClose},
     OciSession:close(),
     OciPort = {oci_port, PortPid},
     OciPort:close(),
-    erlang:send_after(0, self(), {check_reduce, ToClose - 1}),
+    self() ! {check_reduce, ToClose - 1},
     {noreply, State#state{sessions = sort_sessions(Sessions)}};
 handle_info({check_reduce, _}, State) ->
     {noreply, State};
@@ -294,12 +325,12 @@ handle_info({build_pool, N}, State) ->
                                                     State#state.usr,
                                                     State#state.passwd) of
                                {error, Error} ->
+                                   OciPort:close(),
                                    erlang:send_after(?DELAY_RETRY_AFTER_ERROR,
                                                      self(), {build_pool, N}),
                                    {noreply, State#state{lastError = Error}};
                                {oci_port, PortPid, _} = OciSession ->
-                                   erlang:send_after(0, self(),
-                                                     {build_pool, N - 1}),
+                                   self() ! {build_pool, N - 1},
                                    {noreply,
                                     State#state{sessions
                                                 = [#session{
@@ -314,7 +345,7 @@ handle_info({build_pool, N}, State) ->
                    {noreply, State}
             end;
         _Error ->
-            erlang:send_after(0, self(), {build_pool, N}),
+            self() ! {build_pool, N},
             {noreply, State#state{lastError = undefined}}
     end;
 handle_info(_Info, State) ->
@@ -323,7 +354,7 @@ handle_info(_Info, State) ->
 terminate(_Reason, #state{sessions = Sessions}) ->
     [begin
          OciPort = {oci_port, PortPid},
-         ok = OciPort:close()
+         catch OciPort:close()
      end || #session{ssn = {_, PortPid, _}} <- Sessions].
 
 code_change(_OldVsn, State, _Extra) ->

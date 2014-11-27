@@ -7,15 +7,17 @@
 -export([new/5, del/1]).
 
 %% Using Pool APIs
--export([share/2, has_access/1, prep_sql/2, commit/1, rollback/1, bind_vars/2,
-         lob/4, exec_stmt/1, exec_stmt/2, exec_stmt/3, fetch_rows/2, close/1,
-         get_stats/1]).
+-export([share/2, has_access/1, prep_sql/2, bind_vars/2, lob/4, exec_stmt/1,
+         exec_stmt/2, fetch_rows/2, close/1, get_stats/1]).
 
 %% Application callbacks
 -export([start/0, stop/0, start/2, stop/1]).
 
 %% Supervisor callbacks
 -export([init/1]).
+
+%% Logging callbacks
+-export([loginfo/1]).
 
 %% Helper macro for declaring children of supervisor
 -define(SUPNAME, erlocipool_sup).
@@ -86,6 +88,9 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 %
 % Statement management APIs
 %
+% prep_sql and close internally checks the health of a connection if the
+% operation returns error, it triggters a session ping in pool which might
+% lead to a cleanup if session is dead
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
         {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
@@ -99,48 +104,74 @@ close({?MODULE, PidOrName, Stmt}) ->
 %
 % Statement internal APIs
 %
-commit({?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:commit();
-        Other -> Other
-    end.
-
-rollback({?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:rollback();
-        Other -> Other
-    end.
-
 bind_vars(BindVars, {?MODULE, PidOrName, Stmt}) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
         {ok, ErlOciStmt} -> ErlOciStmt:bind_vars(BindVars);
         Other -> Other
     end.
 
+% some errors from statement level APIs lob, exec_stmt, fetch_rows may result
+% because of a closing/closed connection. So all the error paths triggters a
+% session ping in pool which might lead to a cleanup if session is dead
 lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Stmt}) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:lob(LobHandle, Offset, Length);
+        {ok, ErlOciStmt} ->
+            case ErlOciStmt:lob(LobHandle, Offset, Length) of
+                {error, _} = Error ->
+                    gen_server:cast(PidOrName, {check, Stmt}),
+                    Error;
+                Other -> Other
+            end;
         Other -> Other
     end.
 
 exec_stmt({?MODULE, PidOrName, Stmt}) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:exec_stmt();
+        {ok, ErlOciStmt} ->
+            case ErlOciStmt:exec_stmt() of
+                {error, _} = Error ->
+                    gen_server:cast(PidOrName, {check, Stmt}),
+                    Error;
+                Other -> Other
+            end;
         Other -> Other
     end.
 exec_stmt(BindVars, {?MODULE, PidOrName, Stmt}) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:exec_stmt(BindVars);
+        {ok, ErlOciStmt} ->
+            case ErlOciStmt:exec_stmt(BindVars) of
+                {error, _} = Error ->
+                    gen_server:cast(PidOrName, {check, Stmt}),
+                    Error;
+                Other -> Other
+            end;
         Other -> Other
     end.
-exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:exec_stmt(BindVars, AutoCommit);
-        Other -> Other
-    end.
+%exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
+%    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
+%        {ok, ErlOciStmt} -> ErlOciStmt:exec_stmt(BindVars, AutoCommit);
+%        Other -> Other
+%    end.
 
 fetch_rows(Count, {?MODULE, PidOrName, Stmt}) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:fetch_rows(Count);
+        {ok, ErlOciStmt} ->
+           case ErlOciStmt:fetch_rows(Count) of
+                {error, _} = Error ->
+                   gen_server:cast(PidOrName, {check, Stmt}),
+                   Error;
+                Other -> Other
+           end;
         Other -> Other
+    end.
+
+%% ===================================================================
+%% Logging callback APIs
+%% ===================================================================
+
+loginfo({Level,ModStr,FunStr,Line,MsgStr}) ->
+    case Level of
+        info ->
+            io:format("[~p] {~s,~s,~p} ~s~n", [Level,ModStr,FunStr,Line,MsgStr]);
+        _ -> ok
     end.
