@@ -240,14 +240,11 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
             case Sessions of
                 [#session{openStmts = Os1}, #session{openStmts = Os2} = S
                  | _] when Os1 =< Os2 andalso Os2 < MaxStmts ->
-?DBG("pick_session", "DOWN penultimate chosen"),
                     {ok, S, State};
                 [#session{openStmts = Os1} = S, #session{openStmts = Os2}
                  | _] when Os1 < Os2 andalso Os2 >= MaxStmts ->
-?DBG("pick_session", "DOWN ultimate chosen"),
                     {ok, S, State};
                 [#session{openStmts = Os1} = S] when Os1 < MaxStmts ->
-?DBG("pick_session", "DOWN only chosen"),
                     {ok, S, State};
                 _ -> {error, elimit}
             end;
@@ -271,7 +268,7 @@ handle_cast(_Request, State) ->
 handle_info({check_reduce, ToClose},
             #state{sessions =
                    [#session{ssn = {oci_port, PortPid, _} = OciSession,
-                             openStmts = 0} = S | Sessions]} = State)
+                             openStmts = 0} | Sessions]} = State)
   when ToClose > 0 ->
     OciSession:close(),
     OciPort = {oci_port, PortPid},
