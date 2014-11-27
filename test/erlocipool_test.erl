@@ -160,6 +160,8 @@ pool_test_() ->
                      case Stmt:exec_stmt() of
                          {error,{30,<<"ORA-00030: User session ID does not"
                                       " exist.\n">>}} -> ok;
+                         {error,{31,<<"ORA-00031: session marked for kill\n">>}
+                         } -> ok;
                          {executed, 0} ->
                              ?debugFmt("~p wasn't closed on pool stop", [Ps]),
                              ?assertEqual(ok, Stmt:close())
@@ -177,26 +179,35 @@ pool_test_() ->
     }}.
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore, _SessAfter}) ->
+    % Loading Pool
     Stats = Pool:get_stats(),
     ?assertEqual(2, length(Stats)),
     ?assertMatch([{_,0,0},{_,0,0}], Stats),
     [S1] = stmts(Pool, 1),
-    Stats1 = Pool:get_stats(),
-    ?assertEqual(2, length(Stats1)),
-    ?assertMatch([{_,0,0},{_,1,0}], Stats1),
+    ?assertMatch([{_,0,0},{_,1,0}], Pool:get_stats()),
     [S2] = stmts(Pool, 1),
-    Stats2 = Pool:get_stats(),
-    ?assertEqual(3, length(Stats2)),
-    ?assertMatch([{_,0,0},{_,1,0},{_,1,0}], Stats2),
+    ?assertMatch([{_,0,0},{_,1,0},{_,1,0}], Pool:get_stats()),
     [S3, S4] = stmts(Pool, 2),
-    Stats3 = Pool:get_stats(),
-    ?assertEqual(4, length(Stats3)),
-    ?assertMatch([{_,1,0},{_,1,0},{_,1,0},{_,1,0}], Stats3),
+    ?assertMatch([{_,1,0},{_,1,0},{_,1,0},{_,1,0}], Pool:get_stats()),
+
+    % Pool full
     ?assertEqual({error, elimit}, Pool:prep_sql(<<"select * from dual">>)),
+
+    % Depleting pool
     ?assertEqual(ok, S1:close()),
+    ?assertMatch([{_,0,1},{_,1,0},{_,1,0},{_,1,0}], Pool:get_stats()),
     ?assertEqual(ok, S2:close()),
+    ?assertMatch([{_,0,1},{_,0,1},{_,1,0},{_,1,0}], Pool:get_stats()),
     ?assertEqual(ok, S3:close()),
-    ?assertEqual(ok, S4:close()).
+    ?assertMatch([{_,0,1},{_,0,1},{_,0,1},{_,1,0}], Pool:get_stats()),
+    ?assertEqual(ok, S4:close()),
+    ?assertMatch([{_,0,1},{_,0,1},{_,0,1},{_,0,1}], Pool:get_stats()),
+    [S5,S6,S7,S8] = stmts(Pool, 4),
+    ?assertMatch([{_,1,0},{_,1,0},{_,1,1},{_,1,1}], Pool:get_stats()),
+    ?assertEqual(ok, S5:close()),
+    ?assertEqual(ok, S6:close()),
+    ?assertEqual(ok, S7:close()),
+    ?assertEqual(ok, S8:close()).
 
 stmts(Pool, N) -> stmts(Pool, N, []).
 stmts(_Pool, 0, Acc) -> lists:reverse(Acc);

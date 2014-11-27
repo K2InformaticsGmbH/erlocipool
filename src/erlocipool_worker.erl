@@ -212,36 +212,51 @@ pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
     if
         % UP
         SaturatedSessCent >= UpTh ->
-           % Pool growth by 1 will be triggered if possible
-           if SaturatedSessions >= MaxSess ->
-                  % Pool is staurated
-                  % (can't create any more connections or statements)
-                  {error, elimit};
-              SaturatedSessions < MaxSess andalso SessionCount == MaxSess ->
-                  % Pool has reached growth limit. Reusing least used
-                  % connection (from the front of the list) to create new
-                  % statement
-                  [Session | _] = Sessions,
-                  {ok, Session, State};
-              true ->
-                  % Reuse the least used connection (from the front of the
-                  % list) and also trigger pool growth by 1
-                  erlang:send_after(0, self(), {build_pool, 1}),
-                  [Session | _] = Sessions,
-                  {ok, Session, State}
-           end;
-       % DOWN
-       SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
-           % TODO New statement is assigned to second least loaded session.
-           % TODO Pool is reduced by closing old connections if possible.
-           [Session | _] = Sessions,
-           {ok, Session, State};
-       % HOLD
-       true ->
-           % Pool neither grow or reduce in this state. Reusing least used
-           % connection (from the front of the list) to create new statement
-           [Session | _] = Sessions,
-           {ok, Session, State}
+            % Pool growth by 1 will be triggered if possible
+            if SaturatedSessions >= MaxSess ->
+                   % Pool is staurated
+                   % (can't create any more connections or statements)
+                   {error, elimit};
+               SaturatedSessions < MaxSess andalso SessionCount == MaxSess ->
+                   % Pool has reached growth limit. Reusing least used
+                   % connection (from the front of the list) to create new
+                   % statement
+                   [Session | _] = Sessions,
+                   {ok, Session, State};
+               true ->
+                   % Reuse the least used connection (from the front of the
+                   % list) and also trigger pool growth by 1
+                   erlang:send_after(0, self(), {build_pool, 1}),
+                   [Session | _] = Sessions,
+                   {ok, Session, State}
+            end;
+        % DOWN
+        SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
+            % Pool reduction check triggered
+            % (may close old empty connections if exists)
+            erlang:send_after(0, self(), {check_reduce,
+                                          SessionCount - MinSess}),
+            % New statement is assigned to second least loaded session.
+            case Sessions of
+                [#session{openStmts = Os1}, #session{openStmts = Os2} = S
+                 | _] when Os1 =< Os2 andalso Os2 < MaxStmts ->
+?DBG("pick_session", "DOWN penultimate chosen"),
+                    {ok, S, State};
+                [#session{openStmts = Os1} = S, #session{openStmts = Os2}
+                 | _] when Os1 < Os2 andalso Os2 >= MaxStmts ->
+?DBG("pick_session", "DOWN ultimate chosen"),
+                    {ok, S, State};
+                [#session{openStmts = Os1} = S] when Os1 < MaxStmts ->
+?DBG("pick_session", "DOWN only chosen"),
+                    {ok, S, State};
+                _ -> {error, elimit}
+            end;
+        % HOLD
+        true ->
+            % Pool neither grow or reduce in this state. Reusing least used
+            % connection (from the front of the list) to create new statement
+            [Session | _] = Sessions,
+            {ok, Session, State}
     end.
 
 sort_sessions(Sessions) ->
@@ -252,6 +267,19 @@ sort_sessions(Sessions) ->
 
 handle_cast(_Request, State) ->
     {noreply, State}.
+
+handle_info({check_reduce, ToClose},
+            #state{sessions =
+                   [#session{ssn = {oci_port, PortPid, _} = OciSession,
+                             openStmts = 0} = S | Sessions]} = State)
+  when ToClose > 0 ->
+    OciSession:close(),
+    OciPort = {oci_port, PortPid},
+    OciPort:close(),
+    erlang:send_after(0, self(), {check_reduce, ToClose - 1}),
+    {noreply, State#state{sessions = sort_sessions(Sessions)}};
+handle_info({check_reduce, _}, State) ->
+    {noreply, State};
 
 handle_info({build_pool, N}, State) ->
     case State#state.lastError of
