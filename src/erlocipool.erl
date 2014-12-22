@@ -96,7 +96,7 @@ prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
         {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
         Other -> Other
     end;
-prep_sql(PidOrName, Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
+prep_sql(PidOrName, Sql) when is_binary(Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
 
 close({?MODULE, PidOrName, Stmt}) ->
     gen_server:call(PidOrName, {close, self(), Stmt}).
