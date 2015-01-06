@@ -266,7 +266,7 @@ handle_cast({kill, #session{
                       monitor = OciMon} = Session},
             State) ->
     try
-        true = demonitor(OciMon, flush),
+        true = demonitor(OciMon, [flush]),
         OciPort = {oci_port, PortPid},
         ok = OciPort:close()
     catch
