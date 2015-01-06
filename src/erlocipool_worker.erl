@@ -115,8 +115,7 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
             if length(State1#state.sessions) == 0 ->
                    {reply, {error, no_session}, State1};
                true ->
-                   {Statement, State2}
-                   = prep_sql(Sql, State1),
+                   {Statement, State2} = prep_sql(Sql, State1),
                    {reply, Statement, State2}
             end
     end;
@@ -191,8 +190,16 @@ prep_sql(Sql, #state{} = State) ->
                                      | NewState#state.sessions -- [Session]])
                       }};
                 Other ->
-                    ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
-                    {{error, Other}, NewState}
+                    %TODO: Check if there are existing statements
+                    %#session{ssn = {oci_port, PortPid, OciSessionHandle}} = Session,
+                    %handle_cast({check, {PortPid, OciSessnHandle, undefined}}, State),
+                    case State#state.sessions -- [Session] of
+                        [] ->
+                            ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
+                            {{error, Other}, NewState};
+                        OtherSessions ->
+                            prep_sql(Sql, State#state{sessions = OtherSessions})
+                    end
             end;
         {error, Error} ->
             {{error, Error}, State}
