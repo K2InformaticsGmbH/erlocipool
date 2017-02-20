@@ -112,7 +112,8 @@ fetch_data(_) ->
 -define(SESSSQL,
         <<"select '' || s.sid || ',' || s.serial# from gv$session s join "
           "gv$process p on p.addr = s.paddr and p.inst_id = s.inst_id where "
-          "s.type != 'BACKGROUND' and s.program = 'ocierl.exe'">>).
+          "s.type != 'BACKGROUND' and "
+          "(s.program = 'ocierl.exe' or s.program like 'ocierl%')">>).
 pool_test_() ->
     {timeout, 60, {
         setup,
@@ -130,11 +131,13 @@ pool_test_() ->
                 {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
                                         [{type, public}, {sess_min, 2},
                                          {sess_max, 4}, {stmt_max, 1},
-                                         {up_th, 50}, {down_th, 40}]),
+                                         {up_th, 50}, {down_th, 40},
+                                         {ociOpts, [{ping_timeout, 1000}]}]),
                 timer:sleep(500),
                 {Pool, OciPort, OciSession, SessBeforePool}
         end,
         fun({Pool, OciPort, OciSession, SessBeforePool}) ->
+                ?assertEqual(ok, erlocipool:del(test_pub)),
                 {PoolSessns, SessAfterPool}
                 = current_pool_session_ids(OciSession, SessBeforePool),
                 ?debugFmt("Pool : ~p~nSessBeforePool : ~p~n"
@@ -142,7 +145,6 @@ pool_test_() ->
                           [Pool, lists:flatten(SessBeforePool),
                            lists:flatten(SessAfterPool), PoolSessns]),
                 ?assertEqual(ok, application:stop(erlocipool)),
-                ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
                 Stmt1 = OciSession:prep_sql(?SESSSQL),
                 ?assertMatch({cols, _}, Stmt1:exec_stmt()),
                 ?assertEqual({{rows, SessBeforePool}, true},
@@ -152,7 +154,9 @@ pool_test_() ->
                 ?assertEqual(ok, OciPort:close()),
                 ?assertEqual(ok, application:stop(erloci))
         end,
-        {with, [fun saturate_recover/1, fun bad_conn_recover/1]}
+        {with, [fun saturate_recover/1,
+                fun bad_conn_recover/1
+               ]}
     }}.
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore}) ->
@@ -192,8 +196,10 @@ bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     ?assertMatch([{_,0,2},{_,1,1}], Pool:get_stats()),
     {PoolSessns, _} = current_pool_session_ids(OciSession, SessBefore),
     ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
+    timer:sleep(2000),
     ?assertMatch({error, _}, S:exec_stmt()),
-    ?assertMatch([{_,0,2},{_,1,1}], Pool:get_stats()).
+    %% Pool replenished with new sessions
+    ?assertMatch([{_,0,0},{_,0,0}], Pool:get_stats()).
 
 %------------------------
 % Library functions

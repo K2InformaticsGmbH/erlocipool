@@ -281,9 +281,9 @@ handle_cast({kill, #session{
             ?DBG("handle_cast(kill)", "error ~p~n~p",
                  [Reason, erlang:get_stacktrace()])
     end,
-    self() ! {build_pool, State#state.sessMin - length(State#state.sessions)},
-    {noreply, State#state{
-                sessions = sort_sessions(State#state.sessions -- [Session])}};
+    NewSessions = State#state.sessions -- [Session],
+    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
+    {noreply, State#state{sessions = sort_sessions(NewSessions)}};
 handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
     Self = self(),
     spawn(fun() ->
@@ -355,6 +355,19 @@ handle_info({build_pool, N}, State) ->
             self() ! {build_pool, N},
             {noreply, State#state{lastError = undefined}}
     end;
+handle_info({'EXIT', Pid, Reason}, State) ->
+    ?DBG("Got Exit", "For ~p Reason : ~p", [Pid, Reason]),
+    {noreply, State};
+handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
+            #state{sessions = Sessions} = State) ->
+    NewSessions =
+    case [S || #session{monitor = OciMon} = S <- Sessions, OciMon == MonRef] of
+        [Sess] -> lists:delete(Sess, Sessions);
+        _ -> Sessions
+    end,
+    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
+    {noreply, State#state{sessions = NewSessions}};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
