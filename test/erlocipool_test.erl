@@ -112,8 +112,7 @@ fetch_data(_) ->
 -define(SESSSQL,
         <<"select '' || s.sid || ',' || s.serial# from gv$session s join "
           "gv$process p on p.addr = s.paddr and p.inst_id = s.inst_id where "
-          "s.type != 'BACKGROUND' and "
-          "(s.program = 'ocierl.exe' or s.program like 'ocierl%')">>).
+          "s.type != 'BACKGROUND' and s.program like 'ocierl%'">>).
 pool_test_() ->
     {timeout, 60, {
         setup,
