@@ -160,28 +160,51 @@ pool_test_() ->
 
 saturate_recover({Pool, _OciPort, _OciSession, _SessBefore}) ->
     % Loading Pool
-    ?assertMatch([{_,0,0},{_,0,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 0}], Pool:get_stats()),
     [S1] = stmts(Pool, 1),
-    ?assertMatch([{_,0,0},{_,1,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
     [S2] = stmts(Pool, 1),
-    ?assertMatch([{_,0,0},{_,1,0},{_,1,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
     [S3, S4] = stmts(Pool, 2),
-    ?assertMatch([{_,1,0},{_,1,0},{_,1,0},{_,1,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
 
     % Pool full
     ?assertEqual({error, elimit}, Pool:prep_sql(<<"select * from dual">>)),
 
     % Depleting pool
     ?assertEqual(ok, S1:close()),
-    ?assertMatch([{_,0,1},{_,1,0},{_,1,0},{_,1,0}], Pool:get_stats()),
+
+    ?assertMatch([#{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
     ?assertEqual(ok, S2:close()),
-    ?assertMatch([{_,0,1},{_,0,1},{_,1,0},{_,1,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
     ?assertEqual(ok, S3:close()),
-    ?assertMatch([{_,0,1},{_,0,1},{_,0,1},{_,1,0}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 1}], Pool:get_stats()),
     ?assertEqual(ok, S4:close()),
-    ?assertMatch([{_,0,1},{_,0,1},{_,0,1},{_,0,1}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0}], Pool:get_stats()),
     [S5,S6,S7,S8] = stmts(Pool, 4),
-    ?assertMatch([{_,1,0},{_,1,0},{_,1,1},{_,1,1}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 0, open_stmts := 1},
+                  #{closed_stmts := 1, open_stmts := 1},
+                  #{closed_stmts := 1, open_stmts := 1}], Pool:get_stats()),
     ?assertEqual(ok, S5:close()),
     ?assertEqual(ok, S6:close()),
     ?assertEqual(ok, S7:close()),
@@ -189,16 +212,21 @@ saturate_recover({Pool, _OciPort, _OciSession, _SessBefore}) ->
 
 bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     % Loading Pool
-    ?assertMatch([{_,0,1},{_,0,1},{_,0,2},{_,0,2}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 0},
+                  #{closed_stmts := 2, open_stmts := 0},
+                  #{closed_stmts := 2, open_stmts := 0}], Pool:get_stats()),
     {ok, S} = Pool:prep_sql(<<"select * from dual">>),
     _ = Pool:get_stats(),
-    ?assertMatch([{_,0,2},{_,1,1}], Pool:get_stats()),
+    ?assertMatch([#{closed_stmts := 2, open_stmts := 0},
+                  #{closed_stmts := 1, open_stmts := 1}], Pool:get_stats()),
     {PoolSessns, _} = current_pool_session_ids(OciSession, SessBefore),
     ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
     timer:sleep(2000),
     ?assertMatch({error, _}, S:exec_stmt()),
     %% Pool replenished with new sessions
-    ?assertMatch([{_,0,0},{_,0,0}], Pool:get_stats()).
+    ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 0}], Pool:get_stats()).
 
 %------------------------
 % Library functions

@@ -80,7 +80,7 @@ handle_call({sessions, Pid}, From, State) ->
         {reply, false, NewState} ->
             {reply, {error, private}, NewState};
         {reply, true, NewState} ->
-            {reply, [{OciSession, O, C}
+            {reply, [#{session => OciSession, open_stmts => O, closed_stmts => C}
                      || #session{ssn = OciSession,
                                  openStmts = O,
                                  closedStmts = C} <- NewState#state.sessions],
