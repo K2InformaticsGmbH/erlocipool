@@ -316,56 +316,51 @@ handle_info({check_reduce, ToClose},
 handle_info({check_reduce, _}, State) ->
     {noreply, State};
 
-handle_info({build_pool, N}, State) ->
-    case State#state.lastError of
-        undefined ->
-            if length(State#state.sessions) < State#state.sessMax
-               andalso N > 0 ->
-                   case catch erloci:new(State#state.ociOpts,
-                                         State#state.logFun) of
-                       {'EXIT', {Error, _}} ->
-                           erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(),
-                                             {build_pool, N}),
+handle_info({build_pool, N}, #state{lastError = undefined} = State) ->
+    if length(State#state.sessions) < State#state.sessMax andalso N > 0 ->
+           case catch erloci:new(State#state.ociOpts, State#state.logFun) of
+               {'EXIT', {Error, _}} ->
+                   erlang:send_after(?DELAY_RETRY_AFTER_ERROR, self(),
+                                     {build_pool, N}),
+                   {noreply, State#state{lastError = Error}};
+               {oci_port, PortPid} = OciPort ->
+                   case OciPort:get_session(State#state.tns, State#state.usr,
+                                            State#state.passwd) of
+                       {error, Error} ->
+                           OciPort:close(),
+                           erlang:send_after(?DELAY_RETRY_AFTER_ERROR,
+                                             self(), {build_pool, N}),
                            {noreply, State#state{lastError = Error}};
-                       {oci_port, PortPid} = OciPort ->
-                           case OciPort:get_session(State#state.tns,
-                                                    State#state.usr,
-                                                    State#state.passwd) of
-                               {error, Error} ->
-                                   OciPort:close(),
-                                   erlang:send_after(?DELAY_RETRY_AFTER_ERROR,
-                                                     self(), {build_pool, N}),
-                                   {noreply, State#state{lastError = Error}};
-                               {oci_port, PortPid, _} = OciSession ->
-                                   self() ! {build_pool, N - 1},
-                                   {noreply,
-                                    State#state{sessions
-                                                = [#session{
-                                                      ssn = OciSession,
-                                                      monitor = erlang:monitor(
-                                                                  process,
-                                                                  PortPid)}
-                                                   | State#state.sessions]}}
-                           end
-                   end;
-               true ->
-                   {noreply, State}
-            end;
-        _Error ->
-            self() ! {build_pool, N},
-            {noreply, State#state{lastError = undefined}}
+                       {oci_port, PortPid, _} = OciSession ->
+                           self() ! {build_pool, N - 1},
+                           {noreply,
+                            State#state{
+                              sessions = [#session{
+                                             ssn = OciSession,
+                                             monitor = erlang:monitor(
+                                                         process, PortPid)}
+                                          | State#state.sessions]}}
+                   end
+           end;
+       true ->
+           {noreply, State}
     end;
+handle_info({build_pool, N}, State) ->
+    self() ! {build_pool, N},
+    {noreply, State#state{lastError = undefined}};
 handle_info({'EXIT', Pid, Reason}, State) ->
     ?DBG("Got Exit", "For ~p Reason : ~p", [Pid, Reason]),
     {noreply, State};
 handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
             #state{sessions = Sessions} = State) ->
     NewSessions =
-    case [S || #session{monitor = OciMon} = S <- Sessions, OciMon == MonRef] of
+    case [S || #session{monitor = OciMon} = S <- Sessions,
+               OciMon == MonRef] of
         [Sess] -> lists:delete(Sess, Sessions);
         _ -> Sessions
     end,
-    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
+    % #10 : replace with a new sesion immediately
+    self() ! {build_pool, 1},
     {noreply, State#state{sessions = NewSessions}};
 
 handle_info(_Info, State) ->
