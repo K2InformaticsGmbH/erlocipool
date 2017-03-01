@@ -6,7 +6,8 @@
 -record(session, {ssn, monitor, openStmts = 0, closedStmts = 0}).
 -record(state, {name, type, owner, ociOpts, logFun, tns, usr, passwd,
                 sessMin = 0, sessMax = 0, stmtMax = 0, lastError, upTh = 0,
-                shares = [], sessions = [] :: #session{}, downTh = 0}).
+                sess_restart_codes = [], shares = [],
+                sessions = [] :: #session{}, downTh = 0}).
 
 % supervisor interface
 -export([start_link/6]).
@@ -53,16 +54,22 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
         MaxStmtsPerSession = proplists:get_value(stmt_max, Opts, 20),
         if is_integer(MaxStmtsPerSession) andalso MaxStmtsPerSession > 0 -> ok;
            true -> exit({invalid, stmt_max}) end,
-        
+
         UpThreshHold = proplists:get_value(up_th, Opts, 50),
         if is_number(UpThreshHold) andalso UpThreshHold > 1.0
            andalso UpThreshHold < 100.0 -> ok;
            true -> exit({invalid, up_th}) end,
-        
+
         DownThreshHold = proplists:get_value(down_th, Opts, 40),
         if is_number(DownThreshHold) andalso DownThreshHold > 1.0 andalso
            DownThreshHold < 100.0 andalso DownThreshHold < UpThreshHold -> ok;
            true -> exit({invalid, down_th}) end,
+
+        SessionRestartCodes = proplists:get_value(sess_kill, Opts, []),
+        AllInteger = lists:usort([is_integer(SRC) || SRC <- SessionRestartCodes]),
+        if is_list(SessionRestartCodes) andalso
+           (AllInteger == [true] orelse AllInteger == []) -> ok;
+           true -> exit({invalid, sess_kill}) end,
 
         self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
@@ -70,6 +77,7 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
                     sessMin = MinSessions, sessMax = MaxSessions,
                     stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
+                    sess_restart_codes = SessionRestartCodes,
                     downTh = DownThreshHold}}
     catch
         _:Reason -> {stop, Reason}
@@ -171,103 +179,6 @@ handle_call({has_access, Pid}, _From, State) ->
 handle_call(_Request, _From, State) ->
     {reply, ok, State}.
 
--spec prep_sql(Sql :: binary(), State :: #state{}) ->
-    {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
-prep_sql(Sql, #state{} = State) ->
-    case pick_session(State) of
-        {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn} = Session,
-         NewState} ->
-            case OciSsn:prep_sql(Sql) of
-                {oci_port, statement, PortPid, OciSessionHandle,
-                 OciStatementHandle} ->
-                    %?DBG("prep_sql", "sql ~p, statement ~p",
-                    %[Sql, OciStatementHandle]),
-                    {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
-                     NewState#state{
-                       sessions = sort_sessions(
-                                    [Session#session{
-                                       openStmts = Session#session.openStmts + 1}
-                                     | NewState#state.sessions -- [Session]])
-                      }};
-                Other ->
-                    %TODO: Check if there are existing statements
-                    %#session{ssn = {oci_port, PortPid, OciSessionHandle}} = Session,
-                    %handle_cast({check, {PortPid, OciSessnHandle, undefined}}, State),
-                    case State#state.sessions -- [Session] of
-                        [] ->
-                            ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
-                            {{error, Other}, NewState};
-                        OtherSessions ->
-                            prep_sql(Sql, State#state{sessions = OtherSessions})
-                    end
-            end;
-        {error, Error} ->
-            {{error, Error}, State}
-    end.
-
--spec pick_session(State :: #state{}) ->
-    {ok, Session :: #session{}, NewState :: #state{}}
-    | {error, elimit}.
-pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
-                    stmtMax = MaxStmts, upTh = UpTh,
-                    downTh = DownTh} = State) ->
-    SessionCount = length(Sessions),
-    SaturatedSessions = length([1 || #session{openStmts = Os} <- Sessions,
-                                     Os >= MaxStmts]),
-    SaturatedSessCent = SaturatedSessions / SessionCount * 100,
-    
-    if
-        % UP
-        SaturatedSessCent >= UpTh ->
-            % Pool growth by 1 will be triggered if possible
-            if SaturatedSessions >= MaxSess ->
-                   % Pool is staurated
-                   % (can't create any more connections or statements)
-                   {error, elimit};
-               SaturatedSessions < MaxSess andalso SessionCount == MaxSess ->
-                   % Pool has reached growth limit. Reusing least used
-                   % connection (from the front of the list) to create new
-                   % statement
-                   [Session | _] = Sessions,
-                   {ok, Session, State};
-               true ->
-                   % Reuse the least used connection (from the front of the
-                   % list) and also trigger pool growth by 1
-                   self() ! {build_pool, 1},
-                   [Session | _] = Sessions,
-                   {ok, Session, State}
-            end;
-        % DOWN
-        SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
-            % Pool reduction check triggered
-            % (may close old empty connections if exists)
-            self() ! {check_reduce, SessionCount - MinSess},
-            % New statement is assigned to second least loaded session.
-            case Sessions of
-                [#session{openStmts = Os1}, #session{openStmts = Os2} = S
-                 | _] when Os1 =< Os2 andalso Os2 < MaxStmts ->
-                    {ok, S, State};
-                [#session{openStmts = Os1} = S, #session{openStmts = Os2}
-                 | _] when Os1 < Os2 andalso Os2 >= MaxStmts ->
-                    {ok, S, State};
-                [#session{openStmts = Os1} = S] when Os1 < MaxStmts ->
-                    {ok, S, State};
-                _ -> {error, elimit}
-            end;
-        % HOLD
-        true ->
-            % Pool neither grow or reduce in this state. Reusing least used
-            % connection (from the front of the list) to create new statement
-            [Session | _] = Sessions,
-            {ok, Session, State}
-    end.
-
-sort_sessions(Sessions) ->
-    lists:sort(
-      fun(#session{openStmts = OsA}, #session{openStmts = OsB}) ->
-              if OsA =< OsB -> true; true -> false end
-      end, Sessions).
-
 handle_cast({kill, #session{
                       ssn = {oci_port, PortPid, _},
                       monitor = OciMon} = Session},
@@ -281,22 +192,36 @@ handle_cast({kill, #session{
             ?DBG("handle_cast(kill)", "error ~p~n~p",
                  [Reason, erlang:get_stacktrace()])
     end,
-    NewSessions = State#state.sessions -- [Session],
-    self() ! {build_pool, State#state.sessMin - length(NewSessions)},
-    {noreply, State#state{sessions = sort_sessions(NewSessions)}};
+    self() ! {build_pool, 1},
+    {noreply, State#state{
+                sessions = sort_sessions(State#state.sessions -- [Session])
+               }};
+handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle} = Stmt, OraCode},
+            #state{sess_restart_codes = Codes} = State) ->
+    case lists:member(OraCode, Codes) of
+        true ->
+            %?DBG("handle_cast({check, Stmt, OraErr})",
+            %     "session restart on error ~p : ~p, kill ~p",
+            %     [OraCode, Codes, {PortPid, OciSessnHandle}]),
+            kill(self(), PortPid, OciSessnHandle, State#state.sessions);
+        false ->
+            %?DBG("handle_cast({check, Stmt, OraErr})",
+            %     "session NOT restart on error ~p : ~p",
+            %     [OraCode, Codes]),
+            gen_server:cast(self(), {check, Stmt})
+    end,
+    {noreply, State};
 handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
     Self = self(),
     spawn(fun() ->
                   OciSession = {oci_port, PortPid, OciSessnHandle},
+                  %?DBG("OciSession:ping()", "session ~p",
+                  %     [{PortPid, OciSessnHandle}]),
                   case catch OciSession:ping() of
                       ok -> ok;
                       _Error ->
-                          case [S || #session{ssn={oci_port,PP,OSessnH}}=S
-                                     <- State#state.sessions,
-                                     OSessnH==OciSessnHandle, PP==PortPid] of
-                              [S] -> gen_server:cast(Self, {kill, S});
-                              _ -> ok
-                          end
+                          kill(Self, PortPid, OciSessnHandle,
+                               State#state.sessions)
                   end
           end),
     {noreply, State};
@@ -356,13 +281,12 @@ handle_info({'DOWN', MonRef, process, _OciPortPid, _Reason},
     NewSessions =
     case [S || #session{monitor = OciMon} = S <- Sessions,
                OciMon == MonRef] of
-        [Sess] -> lists:delete(Sess, Sessions);
+        [Sess] -> sort_sessions(lists:delete(Sess, Sessions));
         _ -> Sessions
     end,
     % #10 : replace with a new sesion immediately
     self() ! {build_pool, 1},
     {noreply, State#state{sessions = NewSessions}};
-
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -377,3 +301,111 @@ code_change(_OldVsn, State, _Extra) ->
 
 format_status(_Opt, [_PDict, State]) ->
     State.
+
+%% ===================================================================
+%% private
+%% ===================================================================
+
+kill(Self, PortPid, OciSessnHandle, Sessions) ->
+    case [S || #session{ssn={oci_port,PP,OSessnH}} = S <- Sessions,
+               OSessnH == OciSessnHandle, PP == PortPid] of
+        [S] -> gen_server:cast(Self, {kill, S});
+        _ -> ok
+    end.
+
+sort_sessions(Sessions) ->
+    lists:sort(
+      fun(#session{openStmts = OsA}, #session{openStmts = OsB}) ->
+              if OsA =< OsB -> true; true -> false end
+      end, Sessions).
+
+-spec pick_session(State :: #state{}) ->
+    {ok, Session :: #session{}, NewState :: #state{}}
+    | {error, elimit}.
+pick_session(#state{sessions = Sessions, sessMin = MinSess, sessMax = MaxSess,
+                    stmtMax = MaxStmts, upTh = UpTh,
+                    downTh = DownTh} = State) ->
+    SessionCount = length(Sessions),
+    SaturatedSessions = length([1 || #session{openStmts = Os} <- Sessions,
+                                     Os >= MaxStmts]),
+    SaturatedSessCent = SaturatedSessions / SessionCount * 100,
+
+    if
+        % UP
+        SaturatedSessCent >= UpTh ->
+            % Pool growth by 1 will be triggered if possible
+            if SaturatedSessions >= MaxSess ->
+                   % Pool is staurated
+                   % (can't create any more connections or statements)
+                   {error, elimit};
+               SaturatedSessions < MaxSess andalso SessionCount == MaxSess ->
+                   % Pool has reached growth limit. Reusing least used
+                   % connection (from the front of the list) to create new
+                   % statement
+                   [Session | _] = Sessions,
+                   {ok, Session, State};
+               true ->
+                   % Reuse the least used connection (from the front of the
+                   % list) and also trigger pool growth by 1
+                   self() ! {build_pool, 1},
+                   [Session | _] = Sessions,
+                   {ok, Session, State}
+            end;
+        % DOWN
+        SaturatedSessCent =< DownTh andalso SessionCount > MinSess ->
+            % Pool reduction check triggered
+            % (may close old empty connections if exists)
+            self() ! {check_reduce, SessionCount - MinSess},
+            % New statement is assigned to second least loaded session.
+            case Sessions of
+                [#session{openStmts = Os1}, #session{openStmts = Os2} = S
+                 | _] when Os1 =< Os2 andalso Os2 < MaxStmts ->
+                    {ok, S, State};
+                [#session{openStmts = Os1} = S, #session{openStmts = Os2}
+                 | _] when Os1 < Os2 andalso Os2 >= MaxStmts ->
+                    {ok, S, State};
+                [#session{openStmts = Os1} = S] when Os1 < MaxStmts ->
+                    {ok, S, State};
+                _ -> {error, elimit}
+            end;
+        % HOLD
+        true ->
+            % Pool neither grow or reduce in this state. Reusing least used
+            % connection (from the front of the list) to create new statement
+            [Session | _] = Sessions,
+            {ok, Session, State}
+    end.
+
+-spec prep_sql(Sql :: binary(), State :: #state{}) ->
+    {{ok, Statement :: tuple()} | {error, any()}, Sessions :: [#session{}]}.
+prep_sql(Sql, #state{} = State) ->
+    case pick_session(State) of
+        {ok, #session{ssn = {oci_port, _, OciSessionHandle} = OciSsn} = Session,
+         NewState} ->
+            case OciSsn:prep_sql(Sql) of
+                {oci_port, statement, PortPid, OciSessionHandle,
+                 OciStatementHandle} ->
+                    %?DBG("prep_sql", "sql ~p, statement ~p",
+                    %[Sql, OciStatementHandle]),
+                    {{ok, {PortPid, OciSessionHandle, OciStatementHandle}},
+                     NewState#state{
+                       sessions = sort_sessions(
+                                    [Session#session{
+                                       openStmts = Session#session.openStmts + 1}
+                                     | NewState#state.sessions -- [Session]])
+                      }};
+                Other ->
+                    %TODO: Check if there are existing statements
+                    %#session{ssn = {oci_port, PortPid, OciSessionHandle}} = Session,
+                    %handle_cast({check, {PortPid, OciSessnHandle, undefined}}, State),
+                    case State#state.sessions -- [Session] of
+                        [] ->
+                            ?DBG("prep_sql", "sql ~p, statement ~p~n", [Sql, Other]),
+                            {{error, Other}, NewState};
+                        OtherSessions ->
+                            prep_sql(Sql, State#state{sessions = OtherSessions})
+                    end
+            end;
+        {error, Error} ->
+            {{error, Error}, State}
+    end.
