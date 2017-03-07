@@ -192,7 +192,6 @@ handle_cast({kill, #session{
             ?DBG("handle_cast(kill)", "error ~p~n~p",
                  [Reason, erlang:get_stacktrace()])
     end,
-    self() ! {build_pool, 1},
     {noreply, State#state{
                 sessions = sort_sessions(State#state.sessions -- [Session])
                }};
@@ -203,6 +202,7 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle} = Stmt, OraCode},
             %?DBG("handle_cast({check, Stmt, OraErr})",
             %     "session restart on error ~p : ~p, kill ~p",
             %     [OraCode, Codes, {PortPid, OciSessnHandle}]),
+            self() ! {build_pool, 1},
             kill(self(), PortPid, OciSessnHandle, State#state.sessions);
         false ->
             %?DBG("handle_cast({check, Stmt, OraErr})",
