@@ -145,6 +145,7 @@ pool_test_() ->
                            lists:flatten(SessAfterPool), PoolSessns]),
                 ?assertEqual(ok, application:stop(erlocipool)),
                 Stmt1 = OciSession:prep_sql(?SESSSQL),
+                timer:sleep(2000),
                 ?assertMatch({cols, _}, Stmt1:exec_stmt()),
                 ?assertEqual({{rows, SessBeforePool}, true},
                              Stmt1:fetch_rows(10000)),
@@ -226,6 +227,8 @@ bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     ?assertMatch({error, _}, S:exec_stmt()),
     %% Pool replenished with new sessions
     ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 0},
+                  #{closed_stmts := 0, open_stmts := 0},
                   #{closed_stmts := 0, open_stmts := 0}], Pool:get_stats()).
 
 %------------------------

@@ -308,9 +308,7 @@ handle_info({check_reduce, ToClose},
                    [#session{ssn = {oci_port, PortPid, _} = OciSession,
                              openStmts = 0} | Sessions]} = State)
   when ToClose > 0 ->
-    OciSession:close(),
-    OciPort = {oci_port, PortPid},
-    OciPort:close(),
+    gen_server:cast(self(), {kill, OciSession}),
     self() ! {check_reduce, ToClose - 1},
     {noreply, State#state{sessions = sort_sessions(Sessions)}};
 handle_info({check_reduce, _}, State) ->
