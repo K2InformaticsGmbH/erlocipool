@@ -151,7 +151,7 @@ pool_test_() ->
                              Stmt1:fetch_rows(10000)),
                 ?assertEqual(ok, Stmt1:close()),
                 ?assertEqual(ok, OciSession:close()),
-                ?assertEqual(ok, OciPort:close()),
+                OciPort:close(),
                 ?assertEqual(ok, application:stop(erloci))
         end,
         {with, [fun saturate_recover/1,
