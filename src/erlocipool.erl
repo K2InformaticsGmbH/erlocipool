@@ -64,14 +64,12 @@ new(Name, Tns, User, Password, Opts) ->
         {error, Error} -> {error, Error}
     end.
 
-del({?MODULE, Child}) ->
-    supervisor:terminate_child(?SUPNAME, Child);
-del(PidOrName) ->
-    del({?MODULE, whereis(PidOrName)}).
+del({?MODULE, Child}) -> del(Child);
+del(PoolName) when is_atom(PoolName) -> del(whereis(PoolName));
+del(Child) when is_pid(Child) -> supervisor:terminate_child(?SUPNAME, Child).
 
-get_stats({?MODULE, PidOrName}) ->
-    gen_server:call(PidOrName, {sessions, self()});
-get_stats(PidOrName) -> get_stats({?MODULE, PidOrName}).
+get_stats({?MODULE, PidOrName}) -> get_stats(PidOrName);
+get_stats(PidOrName) -> gen_server:call(PidOrName, {sessions, self()}).
 
 %% ===================================================================
 %% Pool Access/Services APIs
@@ -105,63 +103,36 @@ close({?MODULE, PidOrName, Stmt}) ->
 % Statement internal APIs
 %
 bind_vars(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} -> ErlOciStmt:bind_vars(BindVars);
-        Other -> Other
-    end.
+    stmt_op(PidOrName, Stmt, bind_vars, [BindVars]).
+lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Stmt}) ->
+    stmt_op(PidOrName, Stmt, lob, [LobHandle, Offset, Length]).
+
+exec_stmt({?MODULE, PidOrName, Stmt}) ->
+    stmt_op(PidOrName, Stmt, exec_stmt, []).
+exec_stmt(BindVars, {?MODULE, PidOrName, Stmt}) ->
+    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars]).
+%exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
+%    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars, AutoCommit]).
+
+fetch_rows(Count, {?MODULE, PidOrName, Stmt}) ->
+    stmt_op(PidOrName, Stmt, fetch_rows, [Count]).
+
 
 % some errors from statement level APIs lob, exec_stmt, fetch_rows may result
 % because of a closing/closed connection. So all the error paths triggters a
 % session ping in pool which might lead to a cleanup if session is dead
-lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Stmt}) ->
+stmt_op(PidOrName, Stmt, Op, Args) ->
     case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
         {ok, ErlOciStmt} ->
-            case ErlOciStmt:lob(LobHandle, Offset, Length) of
+            case apply(ErlOciStmt, Op, Args) of
+                {error, {OraCode, _}} = Error when is_integer(OraCode) ->
+                    gen_server:cast(PidOrName, {check, Stmt, OraCode}),
+                    Error;
                 {error, _} = Error ->
                     gen_server:cast(PidOrName, {check, Stmt}),
                     Error;
                 Other -> Other
             end;
-        Other -> Other
-    end.
-
-exec_stmt({?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} ->
-            case ErlOciStmt:exec_stmt() of
-                {error, _} = Error ->
-                    gen_server:cast(PidOrName, {check, Stmt}),
-                    Error;
-                Other -> Other
-            end;
-        Other -> Other
-    end.
-exec_stmt(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} ->
-            case ErlOciStmt:exec_stmt(BindVars) of
-                {error, _} = Error ->
-                    gen_server:cast(PidOrName, {check, Stmt}),
-                    Error;
-                Other -> Other
-            end;
-        Other -> Other
-    end.
-%exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
-%    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-%        {ok, ErlOciStmt} -> ErlOciStmt:exec_stmt(BindVars, AutoCommit);
-%        Other -> Other
-%    end.
-
-fetch_rows(Count, {?MODULE, PidOrName, Stmt}) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
-        {ok, ErlOciStmt} ->
-           case ErlOciStmt:fetch_rows(Count) of
-                {error, _} = Error ->
-                   gen_server:cast(PidOrName, {check, Stmt}),
-                   Error;
-                Other -> Other
-           end;
         Other -> Other
     end.
 
