@@ -305,7 +305,7 @@ handle_cast(_Request, State) ->
 
 handle_info({check_reduce, ToClose},
             #state{sessions =
-                   [#session{ssn = {oci_port, PortPid, _} = OciSession,
+                   [#session{ssn = OciSession,
                              openStmts = 0} | Sessions]} = State)
   when ToClose > 0 ->
     gen_server:cast(self(), {kill, OciSession}),
