@@ -227,8 +227,6 @@ bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     ?assertMatch({error, _}, S:exec_stmt()),
     %% Pool replenished with new sessions
     ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
-                  #{closed_stmts := 0, open_stmts := 0},
-                  #{closed_stmts := 0, open_stmts := 0},
                   #{closed_stmts := 0, open_stmts := 0}], Pool:get_stats()).
 
 %------------------------

@@ -186,7 +186,7 @@ handle_cast({kill, #session{
     try
         true = demonitor(OciMon, [flush]),
         OciPort = {oci_port, PortPid},
-        ok = OciPort:close()
+        OciPort:close()
     catch
         _:Reason ->
             ?DBG("handle_cast(kill)", "error ~p~n~p",
@@ -218,7 +218,7 @@ handle_cast({check, {PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
                   %?DBG("OciSession:ping()", "session ~p",
                   %     [{PortPid, OciSessnHandle}]),
                   case catch OciSession:ping() of
-                      ok -> ok;
+                      pong -> ok;
                       _Error ->
                           kill(Self, PortPid, OciSessnHandle,
                                State#state.sessions)
@@ -230,10 +230,9 @@ handle_cast(_Request, State) ->
 
 handle_info({check_reduce, ToClose},
             #state{sessions =
-                   [#session{ssn = OciSession,
-                             openStmts = 0} | Sessions]} = State)
+                   [#session{openStmts = 0} = Session | Sessions]} = State)
   when ToClose > 0 ->
-    gen_server:cast(self(), {kill, OciSession}),
+    gen_server:cast(self(), {kill, Session}),
     self() ! {check_reduce, ToClose - 1},
     {noreply, State#state{sessions = sort_sessions(Sessions)}};
 handle_info({check_reduce, _}, State) ->
