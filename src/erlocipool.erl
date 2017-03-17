@@ -65,6 +65,7 @@ new(Name, Tns, User, Password, Opts) ->
     end.
 
 del({?MODULE, Child}) -> del(Child);
+del(undefined) -> {error, badpool};
 del(PoolName) when is_atom(PoolName) -> del(whereis(PoolName));
 del(Child) when is_pid(Child) -> supervisor:terminate_child(?SUPNAME, Child).
 
