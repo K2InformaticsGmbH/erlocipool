@@ -73,11 +73,11 @@ init([Name, Owner, Tns, User, Password, Opts]) ->
 
         self() ! {build_pool, MinSessions},
         process_flag(trap_exit, true),
-        {ok, #state{name = Name, type = Type, owner = Owner, ociOpts = OciOpts,
+        {ok, #state{name = atom_to_binary(Name, utf8), type = Type, owner = Owner,
                     logFun = LogFun, tns = Tns, usr = User, passwd = Password,
                     sessMin = MinSessions, sessMax = MaxSessions,
                     stmtMax = MaxStmtsPerSession, upTh = UpThreshHold,
-                    sess_restart_codes = SessionRestartCodes,
+                    sess_restart_codes = SessionRestartCodes, ociOpts = OciOpts,
                     downTh = DownThreshHold}}
     catch
         _:Reason -> {stop, Reason}
@@ -247,7 +247,7 @@ handle_info({build_pool, N}, #state{lastError = undefined} = State) ->
                    {noreply, State#state{lastError = Error}};
                {oci_port, PortPid} = OciPort ->
                    case OciPort:get_session(State#state.tns, State#state.usr,
-                                            State#state.passwd) of
+                                            State#state.passwd, State#state.name) of
                        {error, Error} ->
                            OciPort:close(),
                            erlang:send_after(?DELAY_RETRY_AFTER_ERROR,

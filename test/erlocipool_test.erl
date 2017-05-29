@@ -122,7 +122,7 @@ pool_test_() ->
                             [{logging, true},
                              {env, [{"NLS_LANG",
                                      "GERMAN_SWITZERLAND.AL32UTF8"}]}]),
-                OciSession = OciPort:get_session(?TNS, ?USER, ?PASSWORD),
+                OciSession = OciPort:get_session(?TNS, ?USER, ?PASSWORD, <<"pool_test">>),
                 Stmt = OciSession:prep_sql(?SESSSQL),
                 {cols, _} = Stmt:exec_stmt(),
                 {{rows, SessBeforePool}, true} = Stmt:fetch_rows(10000),
