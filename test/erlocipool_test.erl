@@ -130,7 +130,7 @@ pool_test_() ->
                 {ok, Pool} = erlocipool:new(test_pub, ?TNS, ?USER, ?PASSWORD,
                                         [{type, public}, {sess_min, 2},
                                          {sess_max, 4}, {stmt_max, 1},
-                                         {up_th, 50}, {down_th, 40},
+                                         {up_th, 50}, {down_th, 40}, {sess_kill, [3113, 3114]},
                                          {ociOpts, [{ping_timeout, 1000}]}]),
                 timer:sleep(500),
                 {Pool, OciPort, OciSession, SessBeforePool}
@@ -222,12 +222,12 @@ bad_conn_recover({Pool, _OciPort, OciSession, SessBefore}) ->
     ?assertMatch([#{closed_stmts := 2, open_stmts := 0},
                   #{closed_stmts := 1, open_stmts := 1}], Pool:get_stats()),
     {PoolSessns, _} = current_pool_session_ids(OciSession, SessBefore),
+    ?assertEqual({cols,[{<<"DUMMY">>,'SQLT_CHR',2,0,0}]}, S:exec_stmt()),
     ?assertEqual(ok, srv_kill_sessions(PoolSessns, OciSession)),
-    timer:sleep(2000),
     ?assertMatch({error, _}, S:exec_stmt()),
-    %% Pool replenished with new sessions
-    ?assertMatch([#{closed_stmts := 0, open_stmts := 0},
-                  #{closed_stmts := 0, open_stmts := 0}], Pool:get_stats()).
+    timer:sleep(2000),
+    %% session and statement recreated
+    ?assertEqual({cols,[{<<"DUMMY">>,'SQLT_CHR',2,0,0}]}, S:exec_stmt()).
 
 %------------------------
 % Library functions

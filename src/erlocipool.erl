@@ -92,45 +92,47 @@ has_access(PidOrName) -> gen_server:call(PidOrName, {has_access, self()}).
 % lead to a cleanup if session is dead
 prep_sql(Sql, {?MODULE, PidOrName}) when is_binary(Sql) ->
     case gen_server:call(PidOrName, {prep_sql, self(), Sql}, infinity) of
-        {ok, Stmt} -> {ok, {?MODULE, PidOrName, Stmt}};
+        {ok, Ref} -> {ok, {?MODULE, PidOrName, Ref}};
         Other -> Other
     end;
-prep_sql(PidOrName, Sql) when is_binary(Sql) -> prep_sql(Sql, {?MODULE, PidOrName}).
+prep_sql(PidOrName, Sql) when is_binary(Sql) ->
+    prep_sql(Sql, {?MODULE, PidOrName}).
 
-close({?MODULE, PidOrName, Stmt}) ->
-    gen_server:call(PidOrName, {close, self(), Stmt}).
+close({?MODULE, PidOrName, Ref}) ->
+    gen_server:call(PidOrName, {close, self(), Ref}).
 
 %
 % Statement internal APIs
 %
-bind_vars(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, bind_vars, [BindVars]).
-lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, lob, [LobHandle, Offset, Length]).
+bind_vars(BindVars, {?MODULE, PidOrName, Ref}) ->
+    gen_server:cast(PidOrName, {add_binds, Ref, BindVars}),
+    stmt_op(PidOrName, Ref, bind_vars, [BindVars]).
+lob(LobHandle, Offset, Length, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, lob, [LobHandle, Offset, Length]).
 
-exec_stmt({?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, exec_stmt, []).
-exec_stmt(BindVars, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars]).
+exec_stmt({?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, exec_stmt, []).
+exec_stmt(BindVars, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, exec_stmt, [BindVars]).
 %exec_stmt(BindVars, AutoCommit, {?MODULE, PidOrName, Stmt}) ->
 %    stmt_op(PidOrName, Stmt, exec_stmt, [BindVars, AutoCommit]).
 
-fetch_rows(Count, {?MODULE, PidOrName, Stmt}) ->
-    stmt_op(PidOrName, Stmt, fetch_rows, [Count]).
+fetch_rows(Count, {?MODULE, PidOrName, Ref}) ->
+    stmt_op(PidOrName, Ref, fetch_rows, [Count]).
 
 
 % some errors from statement level APIs lob, exec_stmt, fetch_rows may result
 % because of a closing/closed connection. So all the error paths triggters a
 % session ping in pool which might lead to a cleanup if session is dead
-stmt_op(PidOrName, Stmt, Op, Args) ->
-    case gen_server:call(PidOrName, {stmt, self(), Stmt}) of
+stmt_op(PidOrName, Ref, Op, Args) ->
+    case gen_server:call(PidOrName, {stmt, self(), Ref}) of
         {ok, ErlOciStmt} ->
             case apply(ErlOciStmt, Op, Args) of
                 {error, {OraCode, _}} = Error when is_integer(OraCode) ->
-                    gen_server:cast(PidOrName, {check, Stmt, OraCode}),
+                    gen_server:cast(PidOrName, {check, ErlOciStmt, OraCode}),
                     Error;
                 {error, _} = Error ->
-                    gen_server:cast(PidOrName, {check, Stmt}),
+                    gen_server:cast(PidOrName, {check, ErlOciStmt}),
                     Error;
                 Other -> Other
             end;
@@ -144,6 +146,7 @@ stmt_op(PidOrName, Stmt, Op, Args) ->
 loginfo({Level,ModStr,FunStr,Line,MsgStr}) ->
     case Level of
         info ->
-            io:format("[~p] {~s,~s,~p} ~s~n", [Level,ModStr,FunStr,Line,MsgStr]);
+            io:format("[~p] {~s,~s,~p} ~s~n",
+                      [Level,ModStr,FunStr,Line,MsgStr]);
         _ -> ok
     end.
