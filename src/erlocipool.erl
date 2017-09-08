@@ -57,12 +57,14 @@ init([]) ->
 %% Create / Destroy Pool APIs
 %% ===================================================================
 
-new(Name, Tns, User, Password, Opts) ->
+new(Name, Tns, User, Password, Opts) when is_atom(Name), is_binary(Tns),
+  is_binary(User), is_binary(Password), is_list(Opts) ->
     case supervisor:start_child(
            ?SUPNAME, [Name, self(), Tns, User, Password, Opts]) of
         {ok, Child} -> {ok, {?MODULE, Child}};
         {error, Error} -> {error, Error}
-    end.
+    end;
+new(_Name, _Tns, _User, _Password, _Opts) -> {error, bad_config}.
 
 del({?MODULE, Child}) -> del(Child);
 del(undefined) -> {error, badpool};
