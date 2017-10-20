@@ -105,6 +105,7 @@ handle_call({stmt, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
         {reply, true, NewState} ->
             case NewState#state.sessions of
                 [] ->
+                    self() ! {build_pool, State#state.sessMin},
                     {reply, {error, no_session}, NewState};
                 Sessions ->
                     case Stmts of
@@ -130,10 +131,11 @@ handle_call({prep_sql, Pid, Sql}, From, State) ->
             {reply, {error, private}, State1};
         {reply, true, State1} ->
             if length(State1#state.sessions) == 0 ->
-                   {reply, {error, no_session}, State1};
+                  self() ! {build_pool, State#state.sessMin},
+                  {reply, {error, no_session}, State1};
                true ->
-                   {Result, State2} = prep_sql(undefined, Sql, State1),
-                   {reply, Result, State2}
+                  {Result, State2} = prep_sql(undefined, Sql, State1),
+                  {reply, Result, State2}
             end
     end;
 handle_call({close, Pid, Ref}, From, #state{stmts = Stmts} = State) ->
@@ -239,6 +241,7 @@ handle_cast({check, {_, _, PortPid, OciSessnHandle, _OciStmtHandle}}, State) ->
                   case catch OciSession:ping() of
                       pong -> ok;
                       _Error ->
+                          self() ! {build_pool, 1},
                           kill(Self, PortPid, OciSessnHandle,
                                State#state.sessions)
                   end
