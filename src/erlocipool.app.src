@@ -3,7 +3,7 @@
 {application, erlocipool,
  [
   {description, "Erloci connections pooling"},
-  {vsn, "0.2.1"},
+  {vsn, "0.2.2"},
   {registered, []},
   {applications, [
                   kernel,
